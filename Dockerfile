@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
 RUN mkdir -p /app/torch_cache && chmod -R 777 /app/torch_cache
 ENV TORCH_HOME=/app/torch_cache XDG_CACHE_HOME=/app/torch_cache
 
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 

@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y \
         build-essential libglib2.0-0 libsm6 libxrender1 libxext6 \
     && rm -rf /var/lib/apt/lists/*
 
+# cache dirs with perms
+RUN mkdir -p /app/torch_cache && chmod -R 777 /app/torch_cache
+ENV TORCH_HOME=/app/torch_cache XDG_CACHE_HOME=/app/torch_cache
+
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 

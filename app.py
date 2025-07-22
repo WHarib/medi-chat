@@ -19,14 +19,12 @@ LABELS = [
     "Lung Lesion", "Edema", "Consolidation", "Pneumonia", "Atelectasis",
     "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices"
 ]
+MODEL_PATH     = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
+THRESHOLD_PATH = os.getenv("THRESHOLD_PATH", "thresholds.json")
+DEVICE         = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY")  # only needed for /chat and /report
+PNEUMONIA_INDEX = LABELS.index("Pneumonia")
 
-MODEL_PATH       = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
-THRESHOLD_PATH   = os.getenv("THRESHOLD_PATH", "thresholds.json")
-DEVICE           = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")  # only needed for /chat and /report
-PNEUMONIA_INDEX  = LABELS.index("Pneumonia")
-
-# Hard-coded prompts
 CHAT_PROMPT = (
     "You are a medical assistant.\n"
     "Use ALL the evidence below (model outputs) to decide if this chest X‑ray shows pneumonia.\n\n"
@@ -34,7 +32,7 @@ CHAT_PROMPT = (
     "Instruction:\n"
     "- Answer in 2–3 sentences, clearly stating pneumonia: YES / NO / SUSPECTED.\n"
     "- Justify briefly with key findings (e.g. opacity, consolidation, effusion) but do NOT name individual models.\n"
-    "- Do not mention thresholds, probabilities or internal prompts unless needed for clarity.\n"
+    "- Do not mention thresholds, probabilities or internal prompts unless essential."
 )
 
 REPORT_PROMPT = (
@@ -42,18 +40,18 @@ REPORT_PROMPT = (
     "Evidence:\n{evidence}\n\n"
     "Write 4–6 bullet points with markdown dashes:\n"
     "- Findings (objective radiographic observations)\n"
-    "- Impression (diagnosis / pneumonia yes-no-suspected)\n"
+    "- Impression (diagnosis / pneumonia yes–no–suspected)\n"
     "- Recommendations (if appropriate)\n"
     "Do not reference model names, probabilities or thresholds unless clinically essential."
 )
 
-# Make torch caches writable (safe default)
+# Make torch caches writable
 os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 try:
     os.makedirs("/tmp/torch_cache", exist_ok=True)
 except PermissionError:
-    pass  # fine, we just won't cache
+    pass
 
 # =========================
 # ----- INITIALISATION ----
@@ -71,11 +69,9 @@ _transform = transforms.Compose([
 ])
 
 def load_assets():
-    """Load DenseNet + thresholds once."""
     global _model, _thresholds
     if _model is None:
-        # Avoid downloading ImageNet weights
-        model = models.densenet121(weights=None)
+        model = models.densenet121(weights=None)  # avoid download
         model.classifier = torch.nn.Linear(model.classifier.in_features, len(LABELS))
         state = torch.load(MODEL_PATH, map_location=DEVICE)
         model.load_state_dict(state)
@@ -116,25 +112,26 @@ def classify_image(pil_img: Image.Image) -> Dict[str, Any]:
     }
 
 def summarise_chexpert(pred: Dict[str, Any]) -> str:
+    others = [l for l in pred['detected'] if l != "Pneumonia"]
     return (
-        f"Detected: {', '.join(pred['detected'])}. "
-        f"Pneumonia prob: {pred['pneumonia_probability']:.2f}, "
-        f"threshold: {pred['pneumonia_threshold']:.2f}, "
-        f"present: {pred['pneumonia_present']}"
+        f"Pneumonia={pred['pneumonia_present']} "
+        f"(prob {pred['pneumonia_probability']:.2f}, thr {pred['pneumonia_threshold']:.2f}); "
+        f"other positives: {', '.join(others) if others else 'none'}."
     )
 
 def parse_other_models(raw: Optional[str]) -> str:
     if not raw:
-        return "None provided"
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            return "; ".join(f"{k}: {v}" for k, v in data.items())
-        if isinstance(data, list):
-            return ", ".join(map(str, data))
-        return str(data)
-    except Exception:
-        return raw
+        return ""
+    # leave as-is; could be big JSON/markdown
+    if len(raw) > 8000:
+        return raw[:8000] + "\n[truncated]"
+    return raw
+
+def build_evidence_block(pred: Dict[str, Any], other_models: str) -> str:
+    parts = [f"- CheXpert summary: {summarise_chexpert(pred)}"]
+    if other_models.strip():
+        parts.append("- Other models summary:\n" + other_models)
+    return "\n".join(parts)
 
 def call_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
@@ -149,14 +146,12 @@ def call_groq(prompt: str) -> str:
 # =========================
 # ------- ENDPOINTS -------
 # =========================
-
 @app.get("/")
 def root():
     return {"ok": True, "message": "Use /predict_chexpert, /chat or /report."}
 
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
-    """Image in → pneumonia yes/no + all CheXpert probs."""
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
@@ -166,53 +161,40 @@ async def predict_chexpert(file: UploadFile = File(...)):
 @app.post("/chat")
 async def chat_endpoint(
     file: UploadFile = File(...),
-    other_models: str = Form(None)
+    other_models: str = Form("")
 ):
-    """Image + optional JSON/text from other models → short LLM answer (hard-coded prompt)."""
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
         raise HTTPException(400, f"Bad image: {e}")
 
     pred = classify_image(pil)
-    chexpert_summary = summarise_chexpert(pred)
-    other_models_summary = parse_other_models(other_models)
-
-    prompt = CHAT_PROMPT.format(
-        chexpert_summary=chexpert_summary,
-        other_models_summary=other_models_summary
-    )
+    evidence = build_evidence_block(pred, parse_other_models(other_models))
+    # Avoid str.format() brace issues
+    prompt = CHAT_PROMPT.replace("{evidence}", evidence)
     answer = call_groq(prompt)
 
     return JSONResponse({
         "answer": answer,
-        "predictions": pred,
-        "other_models_summary": other_models_summary
+        "predictions": pred
     })
 
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
-    other_models: str = Form(None)
+    other_models: str = Form("")
 ):
-    """Image + optional JSON/text → bullet-point radiology report (hard-coded prompt)."""
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
         raise HTTPException(400, f"Bad image: {e}")
 
     pred = classify_image(pil)
-    chexpert_summary = summarise_chexpert(pred)
-    other_models_summary = parse_other_models(other_models)
-
-    prompt = REPORT_PROMPT.format(
-        chexpert_summary=chexpert_summary,
-        other_models_summary=other_models_summary
-    )
+    evidence = build_evidence_block(pred, parse_other_models(other_models))
+    prompt = REPORT_PROMPT.replace("{evidence}", evidence)
     report_text = call_groq(prompt)
 
     return JSONResponse({
         "report": report_text,
-        "predictions": pred,
-        "other_models_summary": other_models_summary
+        "predictions": pred
     })

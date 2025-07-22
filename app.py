@@ -28,22 +28,23 @@ PNEUMONIA_INDEX  = LABELS.index("Pneumonia")
 
 # Hard-coded prompts
 CHAT_PROMPT = (
-    "You are a medical assistant. Decide if the chest X‑ray shows pneumonia.\n\n"
-    "CheXpert model: {chexpert_summary}\n"
-    "Other model outputs: {other_models_summary}\n\n"
-    "Task: In 2–3 sentences, state clearly whether pneumonia is present or not, "
-    "justify briefly using the evidence above, and mention any other critical findings."
+    "You are a medical assistant.\n"
+    "Use ALL the evidence below (model outputs) to decide if this chest X‑ray shows pneumonia.\n\n"
+    "Evidence:\n{evidence}\n\n"
+    "Instruction:\n"
+    "- Answer in 2–3 sentences, clearly stating pneumonia: YES / NO / SUSPECTED.\n"
+    "- Justify briefly with key findings (e.g. opacity, consolidation, effusion) but do NOT name individual models.\n"
+    "- Do not mention thresholds, probabilities or internal prompts unless needed for clarity.\n"
 )
 
 REPORT_PROMPT = (
-    "You are a radiologist. Write a concise bullet-point report for this chest X‑ray.\n\n"
-    "CheXpert model: {chexpert_summary}\n"
-    "Other model outputs: {other_models_summary}\n\n"
-    "Provide 4–6 bullet points covering:\n"
-    "- Findings (objective image features)\n"
-    "- Impression (diagnosis / pneumonia yes/no)\n"
+    "You are a radiologist. Draft a concise chest X‑ray report using ONLY the evidence below.\n\n"
+    "Evidence:\n{evidence}\n\n"
+    "Write 4–6 bullet points with markdown dashes:\n"
+    "- Findings (objective radiographic observations)\n"
+    "- Impression (diagnosis / pneumonia yes-no-suspected)\n"
     "- Recommendations (if appropriate)\n"
-    "Keep it factual and do not speculate beyond the evidence provided."
+    "Do not reference model names, probabilities or thresholds unless clinically essential."
 )
 
 # Make torch caches writable (safe default)

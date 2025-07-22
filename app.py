@@ -49,7 +49,7 @@ REPORT_PROMPT = (
 
 LLM_REPORT_PROMPT = (
     "You are a senior consultant radiologist.\n"
-    "Use ONLY the evidence below (model outputs / summaries) to write a concise chest X‑ray report.\n\n"
+    "Use ONLY the evidence below (model outputs / summaries) to write a concise chest X‑ray report about PNEUMONIA and if it's there or not, and about the X-Ray in general.\n\n"
     "Evidence:\n{evidence}\n\n"
     "Write 5–7 bullet points with markdown dashes:\n"
     "- Findings (objective observations)\n"

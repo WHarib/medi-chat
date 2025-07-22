@@ -10,6 +10,7 @@ from torchvision import transforms, models
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from groq import Groq
+from pydantic import BaseModel  # <-- moved up
 
 # =========================
 # -------- CONFIG ---------
@@ -22,7 +23,8 @@ LABELS = [
 MODEL_PATH     = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
 THRESHOLD_PATH = os.getenv("THRESHOLD_PATH", "thresholds.json")
 DEVICE         = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY")  # only needed for /chat and /report
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama3-70b-8192")  # optional switch
 PNEUMONIA_INDEX = LABELS.index("Pneumonia")
 
 CHAT_PROMPT = (
@@ -42,10 +44,21 @@ REPORT_PROMPT = (
     "- Findings (objective radiographic observations)\n"
     "- Impression (diagnosis / pneumonia yes–no–suspected)\n"
     "- Recommendations (if appropriate)\n"
-    "Do not reference model names, probabilities or thresholds unless clinically essential."
+    "Do not reference model names, thresholds or probabilities unless clinically essential."
 )
 
-# Make torch caches writable
+LLM_REPORT_PROMPT = (
+    "You are a senior consultant radiologist.\n"
+    "Use ONLY the evidence below (model outputs / summaries) to write a concise chest X‑ray report.\n\n"
+    "Evidence:\n{evidence}\n\n"
+    "Write 5–7 bullet points with markdown dashes:\n"
+    "- Findings (objective observations)\n"
+    "- Impression (pneumonia: yes / no / suspected + key differentials if any)\n"
+    "- Recommendations (follow‑up, further imaging, clinical correlation) if appropriate\n"
+    "Avoid mentioning model names, thresholds or probabilities unless clinically essential."
+)
+
+# torch cache
 os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 try:
@@ -71,18 +84,16 @@ _transform = transforms.Compose([
 def load_assets():
     global _model, _thresholds
     if _model is None:
-        model = models.densenet121(weights=None)  # avoid download
+        model = models.densenet121(weights=None)
         model.classifier = torch.nn.Linear(model.classifier.in_features, len(LABELS))
         state = torch.load(MODEL_PATH, map_location=DEVICE)
         model.load_state_dict(state)
         model.to(DEVICE).eval()
         _model = model
-
     if _thresholds is None:
         with open(THRESHOLD_PATH, "r") as f:
             th = json.load(f)
         _thresholds = np.array([th[l] for l in LABELS], dtype=np.float32)
-
     return _model, _thresholds
 
 def to_tensor(pil_img: Image.Image) -> torch.Tensor:
@@ -137,17 +148,24 @@ def call_groq(prompt: str) -> str:
         raise HTTPException(500, "GROQ_API_KEY is not configured.")
     client = Groq(api_key=GROQ_API_KEY)
     resp = client.chat.completions.create(
-        model="llama3-70b-8192",
+        model=GROQ_MODEL,
         messages=[{"role": "user", "content": prompt}]
     )
     return resp.choices[0].message.content.strip()
+
+# =========================
+# ------- MODELS ---------
+# =========================
+class LLMReportIn(BaseModel):
+    evidence: str
+    summary: Optional[str] = None
 
 # =========================
 # ------- ENDPOINTS -------
 # =========================
 @app.get("/")
 def root():
-    return {"ok": True, "message": "Use /predict_chexpert, /chat or /report."}
+    return {"ok": True, "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
@@ -169,13 +187,10 @@ async def chat_endpoint(
 
     pred = classify_image(pil)
     evidence = build_evidence_block(pred, parse_other_models(other_models))
-    prompt = CHAT_PROMPT.replace("{evidence}", evidence)  # safe
+    prompt = CHAT_PROMPT.replace("{evidence}", evidence)
     answer = call_groq(prompt)
 
-    return JSONResponse({
-        "answer": answer,
-        "predictions": pred
-    })
+    return JSONResponse({"answer": answer, "predictions": pred})
 
 @app.post("/report")
 async def report_endpoint(
@@ -192,7 +207,13 @@ async def report_endpoint(
     prompt = REPORT_PROMPT.replace("{evidence}", evidence)
     report_text = call_groq(prompt)
 
-    return JSONResponse({
-        "report": report_text,
-        "predictions": pred
-    })
+    return JSONResponse({"report": report_text, "predictions": pred})
+
+@app.post("/llmreport")
+async def llmreport_endpoint(payload: LLMReportIn):
+    """Pure LLM report: no image, no CheXpert run."""
+    if not payload.evidence.strip():
+        raise HTTPException(400, "Field 'evidence' is empty.")
+    prompt = LLM_REPORT_PROMPT.replace("{evidence}", payload.evidence)
+    report_text = call_groq(prompt)
+    return JSONResponse({"report": report_text})

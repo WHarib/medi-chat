@@ -1,6 +1,7 @@
+---
 title: Medi-Chat API (CheXpert + Groq)
 emoji: 🩻
-colorFrom: teal
+colorFrom: blue
 colorTo: gray
 sdk: docker
 sdk_version: "1.0"
@@ -26,3 +27,20 @@ FastAPI microservice that:
 ```bash
 curl -F "file=@xray.png" https://<user>-medi-chat.hf.space/predict_chexpert
 curl -F "file=@xray.png" -F "question=What does this mean?" https://<user>-medi-chat.hf.space/chat
+Environment Variables
+Name	Purpose	Required
+GROQ_API_KEY	Groq LLM API key	Only for /chat
+MODEL_PATH	Path to .pth weights	No (defaults)
+THRESHOLD_PATH	Path to thresholds.json	No
+
+Set secrets in the HF Space “Settings → Secrets”.
+
+Notes
+Image preprocessing: 224×224, ImageNet normalisation.
+
+Outputs are sigmoid probs with per-label thresholds from thresholds.json.
+
+If no label passes threshold, returns: "No abnormal findings detected".
+
+Disclaimer
+This tool is for demonstration only and is not a medical device.

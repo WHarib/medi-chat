@@ -1,3 +1,4 @@
+# app.py
 import os, io, json
 from typing import Dict, Any, Optional
 
@@ -22,17 +23,16 @@ LABELS = [
 MODEL_PATH       = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
 THRESHOLD_PATH   = os.getenv("THRESHOLD_PATH", "thresholds.json")
 DEVICE           = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY")
+GROQ_API_KEY     = os.getenv("GROQ_API_KEY")  # only needed for /chat and /report
 PNEUMONIA_INDEX  = LABELS.index("Pneumonia")
 
-# ---- Hard-coded prompts ----
+# Hard-coded prompts
 CHAT_PROMPT = (
     "You are a medical assistant. Decide if the chest X‑ray shows pneumonia.\n\n"
     "CheXpert model: {chexpert_summary}\n"
     "Other model outputs: {other_models_summary}\n\n"
     "Task: In 2–3 sentences, state clearly whether pneumonia is present or not, "
-    "justify briefly using the evidence above, and mention any other critical findings. "
-    "Avoid unnecessary hedging or long explanations."
+    "justify briefly using the evidence above, and mention any other critical findings."
 )
 
 REPORT_PROMPT = (
@@ -43,8 +43,12 @@ REPORT_PROMPT = (
     "- Findings (objective image features)\n"
     "- Impression (diagnosis / pneumonia yes/no)\n"
     "- Recommendations (if appropriate)\n"
-    "Keep it factual and do not speculate beyond the provided evidence."
+    "Keep it factual and do not speculate beyond the evidence provided."
 )
+
+# Optional: ensure torch cache is writable (not strictly needed if weights=None)
+os.environ.setdefault("TORCH_HOME", "/app/torch_cache")
+os.makedirs("/app/torch_cache", exist_ok=True)
 
 # =========================
 # ----- INITIALISATION ----
@@ -64,7 +68,8 @@ _transform = transforms.Compose([
 def load_assets():
     global _model, _thresholds
     if _model is None:
-        model = models.densenet121(weights=models.DenseNet121_Weights.DEFAULT)
+        # Avoid downloading ImageNet weights
+        model = models.densenet121(weights=None)
         model.classifier = torch.nn.Linear(model.classifier.in_features, len(LABELS))
         state = torch.load(MODEL_PATH, map_location=DEVICE)
         model.load_state_dict(state)
@@ -116,7 +121,6 @@ def parse_other_models(raw: Optional[str]) -> str:
     if not raw:
         return "None provided"
     try:
-        # Accept either JSON string or any text; if JSON, pretty summarise
         data = json.loads(raw)
         if isinstance(data, dict):
             return "; ".join(f"{k}: {v}" for k, v in data.items())
@@ -124,7 +128,6 @@ def parse_other_models(raw: Optional[str]) -> str:
             return ", ".join(map(str, data))
         return str(data)
     except Exception:
-        # Not JSON, just return as-is
         return raw
 
 def call_groq(prompt: str) -> str:
@@ -147,9 +150,6 @@ def root():
 
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
-    """
-    Hard-coded: 'Does it show pneumonia?' — returns boolean & probability plus all labels.
-    """
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
@@ -162,9 +162,6 @@ async def chat_endpoint(
     file: UploadFile = File(...),
     other_models: str = Form(None)
 ):
-    """
-    Uses CheXpert + optional outputs from other AI models (JSON/string) to answer a fixed question.
-    """
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
@@ -191,9 +188,6 @@ async def report_endpoint(
     file: UploadFile = File(...),
     other_models: str = Form(None)
 ):
-    """
-    Generates a bullet-point radiology-style report. Hard-coded prompt.
-    """
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:

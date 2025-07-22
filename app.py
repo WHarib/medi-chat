@@ -122,7 +122,6 @@ def summarise_chexpert(pred: Dict[str, Any]) -> str:
 def parse_other_models(raw: Optional[str]) -> str:
     if not raw:
         return ""
-    # leave as-is; could be big JSON/markdown
     if len(raw) > 8000:
         return raw[:8000] + "\n[truncated]"
     return raw
@@ -170,8 +169,7 @@ async def chat_endpoint(
 
     pred = classify_image(pil)
     evidence = build_evidence_block(pred, parse_other_models(other_models))
-    # Avoid str.format() brace issues
-    prompt = CHAT_PROMPT.replace("{evidence}", evidence)
+    prompt = CHAT_PROMPT.replace("{evidence}", evidence)  # safe
     answer = call_groq(prompt)
 
     return JSONResponse({

@@ -1,0 +1,16 @@
+huggingface_hub==0.25.2
+torch==2.2.2
+torchvision==0.17.2
+pandas
+numpy==1.26.4
+scikit-learn
+pillow
+tqdm
+matplotlib
+groq
+gradio==4.36.1  
+pydantic==2.10.6
+fastapi
+uvicorn
+python-multipart
+opencv-python-headless

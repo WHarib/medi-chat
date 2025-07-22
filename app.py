@@ -46,9 +46,13 @@ REPORT_PROMPT = (
     "Keep it factual and do not speculate beyond the evidence provided."
 )
 
-# Optional: ensure torch cache is writable (not strictly needed if weights=None)
-os.environ.setdefault("TORCH_HOME", "/app/torch_cache")
-os.makedirs("/app/torch_cache", exist_ok=True)
+# Make torch caches writable (safe default)
+os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
+os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
+try:
+    os.makedirs("/tmp/torch_cache", exist_ok=True)
+except PermissionError:
+    pass  # fine, we just won't cache
 
 # =========================
 # ----- INITIALISATION ----
@@ -66,6 +70,7 @@ _transform = transforms.Compose([
 ])
 
 def load_assets():
+    """Load DenseNet + thresholds once."""
     global _model, _thresholds
     if _model is None:
         # Avoid downloading ImageNet weights
@@ -150,18 +155,19 @@ def root():
 
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
+    """Image in → pneumonia yes/no + all CheXpert probs."""
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
         raise HTTPException(400, f"Bad image: {e}")
-    result = classify_image(pil)
-    return JSONResponse(result)
+    return JSONResponse(classify_image(pil))
 
 @app.post("/chat")
 async def chat_endpoint(
     file: UploadFile = File(...),
     other_models: str = Form(None)
 ):
+    """Image + optional JSON/text from other models → short LLM answer (hard-coded prompt)."""
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:
@@ -188,6 +194,7 @@ async def report_endpoint(
     file: UploadFile = File(...),
     other_models: str = Form(None)
 ):
+    """Image + optional JSON/text → bullet-point radiology report (hard-coded prompt)."""
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as e:

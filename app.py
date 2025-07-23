@@ -10,7 +10,7 @@ from torchvision import transforms, models
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
 from groq import Groq
-from pydantic import BaseModel  # <-- moved up
+from pydantic import BaseModel
 
 # =========================
 # -------- CONFIG ---------
@@ -20,11 +20,11 @@ LABELS = [
     "Lung Lesion", "Edema", "Consolidation", "Pneumonia", "Atelectasis",
     "Pneumothorax", "Pleural Effusion", "Pleural Other", "Fracture", "Support Devices"
 ]
-MODEL_PATH     = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
-THRESHOLD_PATH = os.getenv("THRESHOLD_PATH", "thresholds.json")
-DEVICE         = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
-GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
-GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama3-70b-8192")  # optional switch
+MODEL_PATH      = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
+THRESHOLD_PATH  = os.getenv("THRESHOLD_PATH", "thresholds.json")
+DEVICE          = "cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu")
+GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
+GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 PNEUMONIA_INDEX = LABELS.index("Pneumonia")
 
 CHAT_PROMPT = (
@@ -44,27 +44,24 @@ REPORT_PROMPT = (
     "- Findings (objective radiographic observations)\n"
     "- Impression (diagnosis / pneumonia yes–no–suspected)\n"
     "- Recommendations (if appropriate)\n"
-    "Do not reference model names, thresholds or probabilities unless clinically essential."
+    "Do not reference model names, probabilities or thresholds unless clinically essential."
 )
 
 LLM_REPORT_PROMPT = (
     "You are a senior consultant radiologist.\n"
-    "Use ALL the evidence you got (model outputs / summaries, etc.) to write a PNEUMONIA chest X‑ray report about PNEUMONIA and if it's there or not, and about the X-Ray in general.\n\n"
+    "Use ALL available evidence (model outputs, summaries, etc.) to write a chest X‑ray report focused on the presence or absence of **pneumonia**. This is your primary diagnostic concern. Also comment briefly on the general appearance of the X-ray.\n\n"
     "Evidence:\n{evidence}\n\n"
-    "Write 5–7 bullet points with markdown dashes:\n"
-    "- Findings (objective observations)\n"
-    "- Impression (pneumonia: yes / no / suspected + key differentials if any)\n"
-    "- Recommendations (follow‑up, further imaging, clinical correlation) if appropriate\n"
-    "Avoid mentioning model names, thresholds or probabilities unless clinically essential."
+    "Write 5–7 bullet points using markdown dashes:\n"
+    "- Findings (objective radiological observations)\n"
+    "- Impression (pneumonia: yes / no / suspected, including key differentials if applicable)\n"
+    "- Recommendations (e.g. follow‑up, additional imaging, clinical correlation), if clinically indicated\n"
+    "Avoid referencing model names, thresholds, or probabilities unless they are clinically relevant."
 )
 
-# torch cache
+# Ensure torch caches are writable on HF
 os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
-try:
-    os.makedirs("/tmp/torch_cache", exist_ok=True)
-except PermissionError:
-    pass
+os.makedirs("/tmp/torch_cache", exist_ok=True)
 
 # =========================
 # ----- INITIALISATION ----
@@ -154,7 +151,7 @@ def call_groq(prompt: str) -> str:
     return resp.choices[0].message.content.strip()
 
 # =========================
-# ------- MODELS ---------
+# ------- MODELS ----------
 # =========================
 class LLMReportIn(BaseModel):
     evidence: str
@@ -189,7 +186,6 @@ async def chat_endpoint(
     evidence = build_evidence_block(pred, parse_other_models(other_models))
     prompt = CHAT_PROMPT.replace("{evidence}", evidence)
     answer = call_groq(prompt)
-
     return JSONResponse({"answer": answer, "predictions": pred})
 
 @app.post("/report")
@@ -206,12 +202,10 @@ async def report_endpoint(
     evidence = build_evidence_block(pred, parse_other_models(other_models))
     prompt = REPORT_PROMPT.replace("{evidence}", evidence)
     report_text = call_groq(prompt)
-
     return JSONResponse({"report": report_text, "predictions": pred})
 
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
-    """Pure LLM report: no image, no CheXpert run."""
     if not payload.evidence.strip():
         raise HTTPException(400, "Field 'evidence' is empty.")
     prompt = LLM_REPORT_PROMPT.replace("{evidence}", payload.evidence)

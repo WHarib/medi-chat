@@ -1,4 +1,3 @@
-# app.py
 import os, io, json
 from typing import Dict, Any, List, Optional
 
@@ -132,11 +131,7 @@ async def predict_chexpert(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat_endpoint(payload: MergeResult):
-    # Begin with the human-readable sentence:
-    # e.g. "This image demonstrates pneumonia."
     header = payload.label_text
-
-    # Then choose a dynamic instruction:
     if payload.final_label == "pneumonia":
         instruction = (
             "Now describe the anatomical location of the pneumonia "
@@ -152,7 +147,6 @@ async def chat_endpoint(payload: MergeResult):
             "Now recommend appropriate next steps, such as further imaging "
             "or clinical correlation."
         )
-
     prompt = (
         "You are a senior consultant radiologist.\n\n"
         f"Assessment Summary: {header}\n\n"
@@ -160,23 +154,32 @@ async def chat_endpoint(payload: MergeResult):
         f"{json.dumps({'buckets': payload.buckets, 'votes': payload.votes}, indent=2)}\n\n"
         f"Instruction: {instruction}"
     )
-
     answer = call_groq(prompt)
     return JSONResponse({"answer": answer, **payload.dict()})
 
 
 @app.post("/report")
-async def report_endpoint(payload: MergeResult):
-    # Start with the one-liner from your JS node
-    header = payload.label_text
+async def report_endpoint(
+    file: UploadFile = File(...),
+    final_label: str        = Form(...),
+    label_text:  str        = Form(...),
+    buckets:      str       = Form(...),
+    votes:        str       = Form(...),
+):
+    # Parse JSON-encoded buckets and votes
+    try:
+        buckets_obj = json.loads(buckets)
+        votes_obj   = json.loads(votes)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "Invalid JSON in form fields 'buckets' or 'votes'.")
 
-    # Dynamic bullet-pointing instructions
-    if payload.final_label == "pneumonia":
+    header = label_text
+    if final_label == "pneumonia":
         detail = (
             "Draft 5–7 bullet points focusing on the presence of pneumonia, "
             "including anatomical location, salient findings, and recommendations."
         )
-    elif payload.final_label == "no_evidence":
+    elif final_label == "no_evidence":
         detail = (
             "Draft 5–7 bullet points describing the chest X-ray, "
             "noting pulmonary fields, mediastinum, and absence of pneumonia."
@@ -191,12 +194,17 @@ async def report_endpoint(payload: MergeResult):
         "You are a senior consultant radiologist.\n\n"
         f"Assessment Summary: {header}\n\n"
         "Supporting data:\n"
-        f"{json.dumps({'buckets': payload.buckets, 'votes': payload.votes}, indent=2)}\n\n"
+        f"{json.dumps({'buckets': buckets_obj, 'votes': votes_obj}, indent=2)}\n\n"
         f"{detail}"
     )
-
     report_text = call_groq(prompt)
-    return JSONResponse({"report": report_text, **payload.dict()})
+    return JSONResponse({
+        "report": report_text,
+        "final_label": final_label,
+        "label_text": label_text,
+        "buckets": buckets_obj,
+        "votes": votes_obj,
+    })
 
 
 @app.post("/llmreport")

@@ -167,23 +167,10 @@ async def chat_endpoint(
 
 @app.post("/report")
 async def report_endpoint(
-    file: UploadFile = File(...),
-    other_models: str = Form("")          # <-- default empty ➜ not “required”
+    file: UploadFile     = File(...),
+    final_label: str     = Form(...)
 ):
-    # If nothing arrived, bail out early
-    if not other_models.strip():
-        raise HTTPException(400, "Form-field 'other_models' is missing.")
-
-    # Parse JSON
-    try:
-        merged      = json.loads(other_models)
-        final_label = merged["final_label"]
-        buckets     = merged["buckets"]
-        votes       = merged["votes"]
-    except Exception:
-        raise HTTPException(400, "Invalid JSON in form field 'other_models'.")
-
-    # 2) Build your one-liner + detailed instructions
+    # Build your one-liner + instructions based on final_label
     if final_label == "pneumonia":
         label_text = "This image demonstrates pneumonia."
         detail     = (
@@ -203,22 +190,16 @@ async def report_endpoint(
             "and recommended next steps."
         )
 
-    # 3) Build & call LLM prompt
     prompt = (
         "You are a senior consultant radiologist.\n\n"
         f"Assessment Summary: {label_text}\n\n"
-        "Supporting data:\n"
-        f"{json.dumps({'buckets': buckets, 'votes': votes}, indent=2)}\n\n"
         f"{detail}"
     )
-    report_text = call_groq(prompt)
-
+    report = call_groq(prompt)
     return JSONResponse({
-        "report":      report_text,
+        "report":      report,
         "final_label": final_label,
-        "label_text":  label_text,
-        "buckets":     buckets,
-        "votes":       votes,
+        "label_text":  label_text
     })
 
 

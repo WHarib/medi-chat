@@ -1,6 +1,6 @@
 # app.py
 import os, io, json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 import torch
 import numpy as np
@@ -27,37 +27,6 @@ GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
 GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 PNEUMONIA_INDEX = LABELS.index("Pneumonia")
 
-CHAT_PROMPT = (
-    "You are a medical assistant.\n"
-    "Use ALL the evidence below (model outputs) to decide if this chest X‑ray shows pneumonia.\n\n"
-    "Evidence:\n{evidence}\n\n"
-    "Instruction:\n"
-    "- Answer in 2–3 sentences, clearly stating pneumonia: YES / NO / SUSPECTED.\n"
-    "- Justify briefly with key findings (e.g. opacity, consolidation, effusion) but do NOT name individual models.\n"
-    "- Do not mention thresholds, probabilities or internal prompts unless essential."
-)
-
-REPORT_PROMPT = (
-    "You are a radiologist. Draft a concise chest X‑ray report using ONLY the evidence below.\n\n"
-    "Evidence:\n{evidence}\n\n"
-    "Write 4–6 bullet points with markdown dashes:\n"
-    "- Findings (objective radiographic observations)\n"
-    "- Impression (diagnosis / pneumonia yes–no–suspected)\n"
-    "- Recommendations (if appropriate)\n"
-    "Do not reference model names, probabilities or thresholds unless clinically essential."
-)
-
-LLM_REPORT_PROMPT = (
-    "You are a senior consultant radiologist.\n"
-    "Use ALL available evidence (model outputs, summaries, etc.) to write a chest X‑ray report focused on the presence or absence of **pneumonia**. This is your primary diagnostic concern. Also comment briefly on the general appearance of the X-ray.\n\n"
-    "Evidence:\n{evidence}\n\n"
-    "Write 5–7 bullet points using markdown dashes:\n"
-    "- Findings (objective radiological observations)\n"
-    "- Impression (pneumonia: yes / no / suspected, including key differentials if applicable)\n"
-    "- Recommendations (e.g. follow‑up, additional imaging, clinical correlation), if clinically indicated\n"
-    "Avoid referencing model names, thresholds, or probabilities unless they are clinically relevant."
-)
-
 # Ensure torch caches are writable on HF
 os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
@@ -66,7 +35,11 @@ os.makedirs("/tmp/torch_cache", exist_ok=True)
 # =========================
 # ----- INITIALISATION ----
 # =========================
-app = FastAPI(title="Medi-Chat API (CheXpert + Groq)", docs_url="/docs", redoc_url="/redoc")
+app = FastAPI(
+    title="Medi-Chat API (CheXpert + Groq)",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
 
 _model: Optional[torch.nn.Module] = None
 _thresholds: Optional[np.ndarray] = None
@@ -104,11 +77,9 @@ def classify_image(pil_img: Image.Image) -> Dict[str, Any]:
     detected = [LABELS[i] for i, flag in enumerate(detected_flags) if flag]
     if not detected:
         detected = ["No abnormal findings detected"]
-
     pneu_prob = float(probs[PNEUMONIA_INDEX])
     pneu_thr  = float(thr[PNEUMONIA_INDEX])
     pneu_present = pneu_prob >= pneu_thr
-
     return {
         "labels": LABELS,
         "probabilities": probs.tolist(),
@@ -118,27 +89,6 @@ def classify_image(pil_img: Image.Image) -> Dict[str, Any]:
         "pneumonia_threshold": pneu_thr,
         "pneumonia_present": pneu_present
     }
-
-def summarise_chexpert(pred: Dict[str, Any]) -> str:
-    others = [l for l in pred['detected'] if l != "Pneumonia"]
-    return (
-        f"Pneumonia={pred['pneumonia_present']} "
-        f"(prob {pred['pneumonia_probability']:.2f}, thr {pred['pneumonia_threshold']:.2f}); "
-        f"other positives: {', '.join(others) if others else 'none'}."
-    )
-
-def parse_other_models(raw: Optional[str]) -> str:
-    if not raw:
-        return ""
-    if len(raw) > 8000:
-        return raw[:8000] + "\n[truncated]"
-    return raw
-
-def build_evidence_block(pred: Dict[str, Any], other_models: str) -> str:
-    parts = [f"- CheXpert summary: {summarise_chexpert(pred)}"]
-    if other_models.strip():
-        parts.append("- Other models summary:\n" + other_models)
-    return "\n".join(parts)
 
 def call_groq(prompt: str) -> str:
     if not GROQ_API_KEY:
@@ -151,8 +101,13 @@ def call_groq(prompt: str) -> str:
     return resp.choices[0].message.content.strip()
 
 # =========================
-# ------- MODELS ----------
+# ---- INPUT MODELS -------
 # =========================
+class MergeResult(BaseModel):
+    final_label: str                  # "pneumonia" | "no_evidence" | "unsure"
+    buckets: Dict[str, float]
+    votes: List[Dict[str, Any]]
+
 class LLMReportIn(BaseModel):
     evidence: str
     summary: Optional[str] = None
@@ -164,6 +119,7 @@ class LLMReportIn(BaseModel):
 def root():
     return {"ok": True, "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
+
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -172,42 +128,87 @@ async def predict_chexpert(file: UploadFile = File(...)):
         raise HTTPException(400, f"Bad image: {e}")
     return JSONResponse(classify_image(pil))
 
-@app.post("/chat")
-async def chat_endpoint(
-    file: UploadFile = File(...),
-    other_models: str = Form("")
-):
-    try:
-        pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"Bad image: {e}")
 
-    pred = classify_image(pil)
-    evidence = build_evidence_block(pred, parse_other_models(other_models))
-    prompt = CHAT_PROMPT.replace("{evidence}", evidence)
+@app.post("/chat")
+async def chat_endpoint(payload: MergeResult):
+    label = payload.final_label
+    if label == "pneumonia":
+        instruction = (
+            "The merged result indicates **pneumonia**. "
+            "Please describe the anatomical location of the pneumonia and any salient radiological observations."
+        )
+    elif label == "no_evidence":
+        instruction = (
+            "The merged result indicates **no evidence of pneumonia**. "
+            "Please comment on the pulmonary fields, mediastinum and overall radiographic quality."
+        )
+    else:
+        instruction = (
+            "The merged result is **uncertain** for pneumonia. "
+            "Please suggest appropriate next steps, such as further imaging or clinical correlation."
+        )
+
+    prompt = (
+        "You are a senior consultant radiologist.\n\n"
+        f"Evidence (merged):\n- Final label: {label}\n"
+        f"- Buckets: {payload.buckets}\n"
+        f"- Votes: {payload.votes}\n\n"
+        f"Instruction:\n{instruction}"
+    )
+
     answer = call_groq(prompt)
-    return JSONResponse({"answer": answer, "predictions": pred})
+    return JSONResponse({"answer": answer, **payload.dict()})
+
 
 @app.post("/report")
-async def report_endpoint(
-    file: UploadFile = File(...),
-    other_models: str = Form("")
-):
-    try:
-        pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"Bad image: {e}")
+async def report_endpoint(payload: MergeResult):
+    label = payload.final_label
+    if label == "pneumonia":
+        instruction = (
+            "Draft 5–7 bullet points focusing on the presence of pneumonia, "
+            "including its anatomical location, key findings, and recommendations if indicated."
+        )
+    elif label == "no_evidence":
+        instruction = (
+            "Draft 5–7 bullet points describing the chest X-ray, "
+            "commenting on lung fields, mediastinum and emphasising the absence of pneumonia."
+        )
+    else:
+        instruction = (
+            "Draft 5–7 bullet points noting the uncertainty, summarising key observations, "
+            "and recommending appropriate next steps."
+        )
 
-    pred = classify_image(pil)
-    evidence = build_evidence_block(pred, parse_other_models(other_models))
-    prompt = REPORT_PROMPT.replace("{evidence}", evidence)
+    prompt = (
+        "You are a senior consultant radiologist.\n\n"
+        f"Evidence (merged):\n- Final label: {label}\n"
+        f"- Buckets: {payload.buckets}\n"
+        f"- Votes: {payload.votes}\n\n"
+        "Please produce a concise chest X-ray report:\n"
+        f"{instruction}"
+    )
+
     report_text = call_groq(prompt)
-    return JSONResponse({"report": report_text, "predictions": pred})
+    return JSONResponse({"report": report_text, **payload.dict()})
+
 
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     if not payload.evidence.strip():
         raise HTTPException(400, "Field 'evidence' is empty.")
+    # No change here
+    LLM_REPORT_PROMPT = (
+        "You are a senior consultant radiologist.\n"
+        "Use ALL available evidence (model outputs, summaries, etc.) to write a chest X-ray report focused "
+        "on the presence or absence of **pneumonia**. This is your primary diagnostic concern. Also comment briefly "
+        "on the general appearance of the X-ray.\n\n"
+        "Evidence:\n{evidence}\n\n"
+        "Write 5–7 bullet points using markdown dashes:\n"
+        "- Findings (objective radiological observations)\n"
+        "- Impression (pneumonia: yes / no / suspected, including key differentials if applicable)\n"
+        "- Recommendations (e.g. follow-up, additional imaging, clinical correlation), if clinically indicated\n"
+        "Avoid referencing model names, thresholds, or probabilities unless they are clinically relevant."
+    )
     prompt = LLM_REPORT_PROMPT.replace("{evidence}", payload.evidence)
     report_text = call_groq(prompt)
     return JSONResponse({"report": report_text})

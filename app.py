@@ -168,9 +168,13 @@ async def chat_endpoint(
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
-    other_models: str = Form(...)
+    other_models: str = Form("")          # <-- default empty ➜ not “required”
 ):
-    # 1) Parse the single JSON field
+    # If nothing arrived, bail out early
+    if not other_models.strip():
+        raise HTTPException(400, "Form-field 'other_models' is missing.")
+
+    # Parse JSON
     try:
         merged      = json.loads(other_models)
         final_label = merged["final_label"]

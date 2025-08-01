@@ -1,3 +1,4 @@
+# app.py
 import os, io, json
 from typing import Dict, Any, List, Optional
 
@@ -102,12 +103,6 @@ def call_groq(prompt: str) -> str:
 # =========================
 # ---- INPUT MODELS -------
 # =========================
-class MergeResult(BaseModel):
-    final_label: str                  # "pneumonia" | "no_evidence" | "unsure"
-    label_text:  str                  # e.g. "This image demonstrates pneumonia."
-    buckets:     Dict[str, float]
-    votes:       List[Dict[str, Any]]
-
 class LLMReportIn(BaseModel):
     evidence: str
     summary: Optional[str] = None
@@ -130,80 +125,94 @@ async def predict_chexpert(file: UploadFile = File(...)):
 
 
 @app.post("/chat")
-async def chat_endpoint(payload: MergeResult):
-    header = payload.label_text
-    if payload.final_label == "pneumonia":
-        instruction = (
-            "Now describe the anatomical location of the pneumonia "
-            "and any key radiological findings."
-        )
-    elif payload.final_label == "no_evidence":
-        instruction = (
-            "Now comment on the lung fields, mediastinum, "
-            "and overall radiographic quality."
-        )
+async def chat_endpoint(
+    file: UploadFile = File(...),
+    other_models: str = Form("")
+):
+    try:
+        pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
+    except Exception as e:
+        raise HTTPException(400, f"Bad image: {e}")
+
+    # build evidence block however you like; here we just pass through
+    merged = json.loads(other_models or "{}")
+    label     = merged.get("final_label", "unsure")
+    buckets   = merged.get("buckets", {})
+    votes     = merged.get("votes", [])
+
+    # one-liner header
+    if label == "pneumonia":
+        header = "This image demonstrates pneumonia."
+        instr  = "Describe the anatomical location and key findings."
+    elif label == "no_evidence":
+        header = "No evidence of pneumonia is seen on this image."
+        instr  = "Comment on lung fields, mediastinum, and image quality."
     else:
-        instruction = (
-            "Now recommend appropriate next steps, such as further imaging "
-            "or clinical correlation."
-        )
+        header = "Findings are uncertain for pneumonia."
+        instr  = "Recommend next steps, e.g. further imaging or clinical correlation."
+
     prompt = (
         "You are a senior consultant radiologist.\n\n"
         f"Assessment Summary: {header}\n\n"
         "Supporting data:\n"
-        f"{json.dumps({'buckets': payload.buckets, 'votes': payload.votes}, indent=2)}\n\n"
-        f"Instruction: {instruction}"
+        f"{json.dumps({'buckets': buckets, 'votes': votes}, indent=2)}\n\n"
+        f"Instruction: {instr}"
     )
+
     answer = call_groq(prompt)
-    return JSONResponse({"answer": answer, **payload.dict()})
+    return JSONResponse({"answer": answer, **merged})
 
 
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
-    final_label: str        = Form(...),
-    label_text:  str        = Form(...),
-    buckets:      str       = Form(...),
-    votes:        str       = Form(...),
+    other_models: str = Form(...)
 ):
-    # Parse JSON-encoded buckets and votes
+    # 1) parse merged JSON
     try:
-        buckets_obj = json.loads(buckets)
-        votes_obj   = json.loads(votes)
-    except json.JSONDecodeError:
-        raise HTTPException(400, "Invalid JSON in form fields 'buckets' or 'votes'.")
+        merged      = json.loads(other_models)
+        final_label = merged["final_label"]
+        buckets     = merged["buckets"]
+        votes       = merged["votes"]
+    except Exception:
+        raise HTTPException(400, "Invalid JSON in form field 'other_models'.")
 
-    header = label_text
+    # 2) dynamic header + detail
     if final_label == "pneumonia":
-        detail = (
+        label_text = "This image demonstrates pneumonia."
+        detail     = (
             "Draft 5–7 bullet points focusing on the presence of pneumonia, "
             "including anatomical location, salient findings, and recommendations."
         )
     elif final_label == "no_evidence":
-        detail = (
+        label_text = "No evidence of pneumonia is seen on this image."
+        detail     = (
             "Draft 5–7 bullet points describing the chest X-ray, "
             "noting pulmonary fields, mediastinum, and absence of pneumonia."
         )
     else:
-        detail = (
+        label_text = "Findings are uncertain for pneumonia."
+        detail     = (
             "Draft 5–7 bullet points summarising the uncertainty, key observations, "
             "and recommended next steps."
         )
 
+    # 3) build & call prompt
     prompt = (
         "You are a senior consultant radiologist.\n\n"
-        f"Assessment Summary: {header}\n\n"
+        f"Assessment Summary: {label_text}\n\n"
         "Supporting data:\n"
-        f"{json.dumps({'buckets': buckets_obj, 'votes': votes_obj}, indent=2)}\n\n"
+        f"{json.dumps({'buckets': buckets, 'votes': votes}, indent=2)}\n\n"
         f"{detail}"
     )
     report_text = call_groq(prompt)
+
     return JSONResponse({
-        "report": report_text,
+        "report":      report_text,
         "final_label": final_label,
-        "label_text": label_text,
-        "buckets": buckets_obj,
-        "votes": votes_obj,
+        "label_text":  label_text,
+        "buckets":     buckets,
+        "votes":       votes,
     })
 
 

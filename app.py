@@ -105,8 +105,9 @@ def call_groq(prompt: str) -> str:
 # =========================
 class MergeResult(BaseModel):
     final_label: str                  # "pneumonia" | "no_evidence" | "unsure"
-    buckets: Dict[str, float]
-    votes: List[Dict[str, Any]]
+    label_text:  str                  # e.g. "This image demonstrates pneumonia."
+    buckets:     Dict[str, float]
+    votes:       List[Dict[str, Any]]
 
 class LLMReportIn(BaseModel):
     evidence: str
@@ -131,29 +132,33 @@ async def predict_chexpert(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat_endpoint(payload: MergeResult):
-    label = payload.final_label
-    if label == "pneumonia":
+    # Begin with the human-readable sentence:
+    # e.g. "This image demonstrates pneumonia."
+    header = payload.label_text
+
+    # Then choose a dynamic instruction:
+    if payload.final_label == "pneumonia":
         instruction = (
-            "The merged result indicates **pneumonia**. "
-            "Please describe the anatomical location of the pneumonia and any salient radiological observations."
+            "Now describe the anatomical location of the pneumonia "
+            "and any key radiological findings."
         )
-    elif label == "no_evidence":
+    elif payload.final_label == "no_evidence":
         instruction = (
-            "The merged result indicates **no evidence of pneumonia**. "
-            "Please comment on the pulmonary fields, mediastinum and overall radiographic quality."
+            "Now comment on the lung fields, mediastinum, "
+            "and overall radiographic quality."
         )
     else:
         instruction = (
-            "The merged result is **uncertain** for pneumonia. "
-            "Please suggest appropriate next steps, such as further imaging or clinical correlation."
+            "Now recommend appropriate next steps, such as further imaging "
+            "or clinical correlation."
         )
 
     prompt = (
         "You are a senior consultant radiologist.\n\n"
-        f"Evidence (merged):\n- Final label: {label}\n"
-        f"- Buckets: {payload.buckets}\n"
-        f"- Votes: {payload.votes}\n\n"
-        f"Instruction:\n{instruction}"
+        f"Assessment Summary: {header}\n\n"
+        "Supporting data:\n"
+        f"{json.dumps({'buckets': payload.buckets, 'votes': payload.votes}, indent=2)}\n\n"
+        f"Instruction: {instruction}"
     )
 
     answer = call_groq(prompt)
@@ -162,30 +167,32 @@ async def chat_endpoint(payload: MergeResult):
 
 @app.post("/report")
 async def report_endpoint(payload: MergeResult):
-    label = payload.final_label
-    if label == "pneumonia":
-        instruction = (
+    # Start with the one-liner from your JS node
+    header = payload.label_text
+
+    # Dynamic bullet-pointing instructions
+    if payload.final_label == "pneumonia":
+        detail = (
             "Draft 5–7 bullet points focusing on the presence of pneumonia, "
-            "including its anatomical location, key findings, and recommendations if indicated."
+            "including anatomical location, salient findings, and recommendations."
         )
-    elif label == "no_evidence":
-        instruction = (
+    elif payload.final_label == "no_evidence":
+        detail = (
             "Draft 5–7 bullet points describing the chest X-ray, "
-            "commenting on lung fields, mediastinum and emphasising the absence of pneumonia."
+            "noting pulmonary fields, mediastinum, and absence of pneumonia."
         )
     else:
-        instruction = (
-            "Draft 5–7 bullet points noting the uncertainty, summarising key observations, "
-            "and recommending appropriate next steps."
+        detail = (
+            "Draft 5–7 bullet points summarising the uncertainty, key observations, "
+            "and recommended next steps."
         )
 
     prompt = (
         "You are a senior consultant radiologist.\n\n"
-        f"Evidence (merged):\n- Final label: {label}\n"
-        f"- Buckets: {payload.buckets}\n"
-        f"- Votes: {payload.votes}\n\n"
-        "Please produce a concise chest X-ray report:\n"
-        f"{instruction}"
+        f"Assessment Summary: {header}\n\n"
+        "Supporting data:\n"
+        f"{json.dumps({'buckets': payload.buckets, 'votes': payload.votes}, indent=2)}\n\n"
+        f"{detail}"
     )
 
     report_text = call_groq(prompt)
@@ -196,7 +203,6 @@ async def report_endpoint(payload: MergeResult):
 async def llmreport_endpoint(payload: LLMReportIn):
     if not payload.evidence.strip():
         raise HTTPException(400, "Field 'evidence' is empty.")
-    # No change here
     LLM_REPORT_PROMPT = (
         "You are a senior consultant radiologist.\n"
         "Use ALL available evidence (model outputs, summaries, etc.) to write a chest X-ray report focused "

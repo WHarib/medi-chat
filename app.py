@@ -2,8 +2,7 @@
 import os, io, json
 from typing import Dict, Any, List, Optional
 
-import torch
-import numpy as np
+import torch, numpy as np
 from PIL import Image
 from torchvision import transforms, models
 
@@ -134,13 +133,16 @@ async def chat_endpoint(
     except Exception as e:
         raise HTTPException(400, f"Bad image: {e}")
 
-    # build evidence block however you like; here we just pass through
-    merged = json.loads(other_models or "{}")
-    label     = merged.get("final_label", "unsure")
-    buckets   = merged.get("buckets", {})
-    votes     = merged.get("votes", [])
+    merged = {}
+    try:
+        merged = json.loads(other_models or "{}")
+    except:
+        pass
 
-    # one-liner header
+    label   = merged.get("final_label", "unsure")
+    buckets = merged.get("buckets", {})
+    votes   = merged.get("votes", [])
+
     if label == "pneumonia":
         header = "This image demonstrates pneumonia."
         instr  = "Describe the anatomical location and key findings."
@@ -168,7 +170,7 @@ async def report_endpoint(
     file: UploadFile = File(...),
     other_models: str = Form(...)
 ):
-    # 1) parse merged JSON
+    # 1) Parse the single JSON field
     try:
         merged      = json.loads(other_models)
         final_label = merged["final_label"]
@@ -177,7 +179,7 @@ async def report_endpoint(
     except Exception:
         raise HTTPException(400, "Invalid JSON in form field 'other_models'.")
 
-    # 2) dynamic header + detail
+    # 2) Build your one-liner + detailed instructions
     if final_label == "pneumonia":
         label_text = "This image demonstrates pneumonia."
         detail     = (
@@ -197,7 +199,7 @@ async def report_endpoint(
             "and recommended next steps."
         )
 
-    # 3) build & call prompt
+    # 3) Build & call LLM prompt
     prompt = (
         "You are a senior consultant radiologist.\n\n"
         f"Assessment Summary: {label_text}\n\n"

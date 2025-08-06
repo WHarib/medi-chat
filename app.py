@@ -133,9 +133,9 @@ async def chat_endpoint(
     try:
         merged = json.loads(other_models or "{}")
         if not isinstance(merged, dict):
-            raise ValueError("Expected a JSON object.")
+            raise ValueError("Expected a JSON object, got a list or invalid structure.")
     except Exception:
-        raise HTTPException(400, "Invalid 'other_models' format. Expected a JSON object (not a list).")
+        raise HTTPException(400, "Invalid 'other_models' format. Must be a JSON object (not a list).")
 
     label   = merged.get("final_label", "unsure")
     buckets = merged.get("buckets", {})
@@ -164,6 +164,7 @@ async def chat_endpoint(
 
     answer = call_groq(prompt)
     return JSONResponse({"answer": answer, **merged})
+
 
 @app.post("/report")
 async def report_endpoint(

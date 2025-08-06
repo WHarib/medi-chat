@@ -292,19 +292,16 @@ async def llmreport_endpoint(request: Request):
 
     # ---------------- build prompt ----------------------------------------
     prompt = (
-        "You are a senior consultant radiologist.\n\n"
-        "**Clinical summary (confirmed, 100 % reliable):**\n"
-        f"{summary_text or '*No summary provided.*'}\n\n"
-        "**Additional model evidence (probabilities, free text, etc.):**\n"
-        f"{evidence_text or '*No evidence provided.*'}\n\n"
-        "Using ALL of the above, write **exactly 5–7 bullet points** "
-        "in British English:\n"
-        " - Begin with the confirmed pneumonia conclusion from the summary.\n"
-        " - Then comment on any other findings suggested by the probabilities.\n"
-        "Do NOT contradict the summary regarding pneumonia, and do NOT add "
-        "headings, dates or patient identifiers.\n\n"
-        "Begin bullet list:"
-    )
+    "You are a senior consultant radiologist. Write a polished, professional "
+    "chest-X-ray report in British English.\n\n"
+    f"Evidence (verbatim):\n{payload.evidence}\n\n"
+    "Your output **must be 5–7 markdown bullets**, but each bullet may be "
+    "one or two sentences long. Use formal language (e.g. “No radiographic "
+    "evidence of …”; “Cardiothoracic ratio is within normal limits”).\n\n"
+    "- Begin with objective **findings**.\n"
+    "- Provide an **impression** (pneumonia: present / absent / indeterminate).\n"
+    "- Add succinct **recommendations** if appropriate."
+)
 
     # ---------------- call Groq -------------------------------------------
     report = call_groq(

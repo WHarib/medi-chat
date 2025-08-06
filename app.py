@@ -4,7 +4,7 @@
 # ================================================================
 
 import os, io, json, re
-from typing import Dict, Any, List, Optional, Union, Tuple
+from typing import Dict, Any, List, Optional, Union
 
 import torch, numpy as np
 from PIL import Image
@@ -15,7 +15,7 @@ from groq import Groq
 from pydantic import BaseModel
 
 # ------------------------------------------------
-# CONFIG
+# CONFIG (unchanged)
 # ------------------------------------------------
 LABELS = [
     "No Finding", "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity",
@@ -25,10 +25,8 @@ LABELS = [
 ]
 MODEL_PATH     = os.getenv("MODEL_PATH", "densenet121_finetuned.pth")
 THRESHOLD_PATH = os.getenv("THRESHOLD_PATH", "thresholds.json")
-DEVICE         = (
-    "cuda" if torch.cuda.is_available()
-    else ("mps" if torch.backends.mps.is_available() else "cpu")
-)
+DEVICE         = ("cuda" if torch.cuda.is_available()
+                  else ("mps" if torch.backends.mps.is_available() else "cpu"))
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
 GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 PNEUMONIA_IDX  = LABELS.index("Pneumonia")
@@ -38,13 +36,10 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 os.makedirs("/tmp/torch_cache", exist_ok=True)
 
 # ------------------------------------------------
-# INITIALISATION
+# FASTAPI SETUP (unchanged)
 # ------------------------------------------------
-app = FastAPI(
-    title="Medi-Chat API (CheXpert + Groq)",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+app = FastAPI(title="Medi-Chat API (CheXpert + Groq)",
+              docs_url="/docs", redoc_url="/redoc")
 
 _model: Optional[torch.nn.Module] = None
 _thresholds: Optional[np.ndarray] = None
@@ -57,7 +52,7 @@ _transform = transforms.Compose([
 ])
 
 # ------------------------------------------------
-# UTILITIES
+# UTILITIES (unchanged)
 # ------------------------------------------------
 def load_assets():
     global _model, _thresholds
@@ -73,33 +68,27 @@ def load_assets():
         _thresholds = np.array([th_map[l] for l in LABELS], dtype=np.float32)
     return _model, _thresholds
 
-
 def to_tensor(img: Image.Image) -> torch.Tensor:
     return _transform(img).unsqueeze(0).to(DEVICE)
-
 
 def classify_image(img: Image.Image) -> Dict[str, Any]:
     model, thr = load_assets()
     with torch.no_grad():
         probs = torch.sigmoid(model(to_tensor(img))).cpu().numpy()[0]
-
     detected = [LABELS[i] for i, p in enumerate(probs) if p >= thr[i]] \
-        or ["No abnormal findings detected"]
-
+               or ["No abnormal findings detected"]
     pneu_prob = float(probs[PNEUMONIA_IDX])
     pneu_thr  = float(thr[PNEUMONIA_IDX])
     pneu_flag = bool(pneu_prob >= pneu_thr)
-
     return {
         "labels": LABELS,
         "probabilities": probs.tolist(),
-        "thresholds":    thr.tolist(),
-        "detected":      detected,
+        "thresholds": thr.tolist(),
+        "detected": detected,
         "pneumonia_probability": pneu_prob,
-        "pneumonia_threshold":   pneu_thr,
-        "pneumonia_present":     pneu_flag
+        "pneumonia_threshold": pneu_thr,
+        "pneumonia_present": pneu_flag
     }
-
 
 def call_groq(messages: Union[str, List[Dict[str, str]]]) -> str:
     if not GROQ_API_KEY:
@@ -111,7 +100,7 @@ def call_groq(messages: Union[str, List[Dict[str, str]]]) -> str:
     return resp.choices[0].message.content.strip()
 
 # ------------------------------------------------
-# Pydantic models
+# Pydantic model (unchanged)
 # ------------------------------------------------
 class LLMReportIn(BaseModel):
     evidence: str
@@ -125,7 +114,6 @@ def root():
     return {"ok": True,
             "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
-# ---------- /predict_chexpert -----------------------------------------------
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -134,9 +122,8 @@ async def predict_chexpert(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}")
 
-# ---------- /chat ------------------------------------------------------------
+# ---------- DEBUG-ENABLED /chat --------------------------------------------
 LABEL_SET = {"pneumonia", "no_evidence", "unsure"}
-
 SYS_TEMPLATES = {
     "pneumonia":
         "You are a senior consultant radiologist. The image shows pneumonia. "
@@ -153,21 +140,19 @@ SYS_TEMPLATES = {
         "pneumonia. Briefly state the uncertainty and outline sensible next "
         "steps (e.g. clinical correlation, follow-up imaging)."
 }
-
 USER_TEMPLATES = {
     "pneumonia":
         "Assessment summary: This image demonstrates pneumonia.\n\n"
         "Supporting data:\n{data}\n\n"
-        "Instruction: Describe location, radiographic features and potential severity.",
+        "Instruction: Describe location and features.",
     "no_evidence":
         "Assessment summary: No evidence of pneumonia is seen on this image.\n\n"
         "Supporting data:\n{data}\n\n"
-        "Instruction: Reassure the clinical team; emphasise normal findings. "
-        "Do not express uncertainty.",
+        "Instruction: Reassure; do not express uncertainty.",
     "unsure":
         "Assessment summary: Findings are uncertain for pneumonia.\n\n"
         "Supporting data:\n{data}\n\n"
-        "Instruction: Suggest appropriate next steps."
+        "Instruction: Suggest next steps."
 }
 
 def detect_label(text: str) -> str:
@@ -181,21 +166,18 @@ def detect_label(text: str) -> str:
     return ""
 
 def labels_from_any_json(blob: str) -> List[str]:
-    """Return every final_label found inside a dict **or** list."""
     try:
         data = json.loads(blob)
     except Exception:
         return []
     found: List[str] = []
-    if isinstance(data, dict):
-        if "final_label" in data:
-            found.append(str(data["final_label"]))
+    if isinstance(data, dict) and "final_label" in data:
+        found.append(str(data["final_label"]))
     elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict) and "final_label" in item:
-                found.append(str(item["final_label"]))
+        for itm in data:
+            if isinstance(itm, dict) and "final_label" in itm:
+                found.append(str(itm["final_label"]))
     return found
-
 
 @app.post("/chat")
 async def chat_endpoint(
@@ -204,56 +186,62 @@ async def chat_endpoint(
     final_label: str = Form(""),
     other_models: str = Form("")
 ):
-    # validate image
+    # 1) Validate image
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
-    except Exception as exc:
-        raise HTTPException(400, f"Bad image: {exc}")
+    except Exception as e:
+        raise HTTPException(400, f"Bad image: {e}")
 
-    # collect every candidate string
+    # 2) Gather form keys & raw candidate strings
     form = await request.form()
-    raw_candidates: List[str] = [
+    form_keys = list(form.keys())
+
+    raw_candidates = [
         final_label,
         form.get("json", ""),
         other_models,
         form.get("other_models", "")
     ]
-    for blob in (other_models, form.get("json", ""), form.get("other_models", "")):
-        raw_candidates.extend(labels_from_any_json(blob or ""))
+    # extract from JSON blobs in any of those fields
+    for blob in [other_models, form.get("json", ""), form.get("other_models", "")]:
+        raw_candidates += labels_from_any_json(blob or "")
 
-    # choose label and remember matched string
-    chosen_label: str = "unsure"
-    matched_string: str = ""
-    for c in raw_candidates:
-        lbl = detect_label(c)
+    # 3) Detect which label we’ll use
+    chosen_label = "unsure"
+    matched_string = ""
+    for candidate in raw_candidates:
+        lbl = detect_label(candidate)
         if lbl:
-            chosen_label, matched_string = lbl, c
+            chosen_label = lbl
+            matched_string = candidate
             break
 
-    # parse context for prompt display
+    # 4) Build context dict for prompt
     try:
         ctx = json.loads(other_models or form.get("json", "") or "{}")
         if not isinstance(ctx, dict):
             ctx = {}
-    except Exception:
+    except:
         ctx = {}
 
-    # build prompt & call Groq
+    # 5) Call the LLM
     messages = [
-        {"role": "system", "content": SYS_TEMPLATES[chosen_label]},
-        {"role": "user",
-         "content": USER_TEMPLATES[chosen_label].format(data=json.dumps(ctx, indent=2))}
+        {"role": "system",  "content": SYS_TEMPLATES[chosen_label]},
+        {"role": "user",    "content": USER_TEMPLATES[chosen_label].format(
+            data=json.dumps(ctx, indent=2))}
     ]
     answer = call_groq(messages)
 
-    # DEBUG payload ----------------------------------------------------------
-    debug_info = {
+    # 6) Return debug info + answer
+    return JSONResponse({
+        "answer":         answer,
         "detected_label": chosen_label,
         "matched_string": matched_string,
-        "raw_candidates": raw_candidates
-    }
-
-    return JSONResponse({"answer": answer, **debug_info, "final_label": chosen_label, **ctx})
+        "raw_candidates": raw_candidates,
+        "form_keys":      form_keys,
+        "final_label":    chosen_label,
+        **ctx
+    })
 
 # ---------- /report & /llmreport remain unchanged ---------------------------
 @app.post("/report")
@@ -264,26 +252,15 @@ async def report_endpoint(
     lbl = detect_label(final_label)
     if lbl == "":
         raise HTTPException(400, "final_label must be pneumonia, no_evidence or unsure.")
-
     hdr_map = {
         "pneumonia":   "This image demonstrates pneumonia.",
         "no_evidence": "No evidence of pneumonia is seen on this image.",
         "unsure":      "Findings are uncertain for pneumonia."
     }
     detail_map = {
-        "pneumonia": (
-            "Draft 5–7 bullet points focusing on the presence of pneumonia, "
-            "including anatomical location, salient radiographic findings and management suggestions."
-        ),
-        "no_evidence": (
-            "Draft 5–7 reassuring bullet points describing the normal chest X-ray, "
-            "highlighting clear lung fields, normal mediastinum and absence of pathology. "
-            "Do not express diagnostic uncertainty."
-        ),
-        "unsure": (
-            "Draft 5–7 bullet points summarising the uncertainty, notable observations "
-            "and suggested next steps (e.g. follow-up imaging, clinical correlation)."
-        )
+        "pneumonia":   "Draft 5–7 bullet points on pneumonia presence & features.",
+        "no_evidence": "Draft 5–7 reassuring bullet points on normal CXR; no uncertainty.",
+        "unsure":      "Draft 5–7 bullet points on uncertainty & next steps."
     }
     prompt = (
         "You are a senior consultant radiologist.\n\n"
@@ -296,15 +273,11 @@ async def report_endpoint(
 async def llmreport_endpoint(payload: LLMReportIn):
     if not payload.evidence.strip():
         raise HTTPException(400, "Field 'evidence' is empty.")
-
     PROMPT = (
         "You are a senior consultant radiologist.\n"
-        "Using **all** the evidence below, write **exactly 5–7 bullet points** "
-        "focused on the presence or absence of **pneumonia** and the general "
-        "appearance of the chest X-ray.\n\n"
-        "Your **entire output must be those bullet points only**, each starting "
-        "with '- '. Do **not** include headings, patient details, dates or any "
-        "other text.\n\n"
+        "Using **all** the evidence below, write exactly **5–7 bullet points** "
+        "focused on pneumonia presence/absence & general appearance.\n\n"
+        "Your entire output **must** be bullet points only, each starting with '-'.\n\n"
         f"Evidence:\n{payload.evidence}\n\n"
         "Begin bullet list:"
     )

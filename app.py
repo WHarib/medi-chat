@@ -261,57 +261,63 @@ async def report_endpoint(
     return JSONResponse({"report": report, "final_label": lbl})
 
 # ---------- /llmreport  (pass-through version) ------------------------------
+# ---------- /llmreport  (pass-everything version) --------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     """
-    Produces a radiology report from free-text evidence and/or summary.
-    Rejects empty or placeholder inputs with 400 (client error) instead
-    of 500 (server error).
+    Forward *exactly* what the caller sends in `evidence` and `summary`
+    to GPT-OSS-120B.  No parsing, no placeholder filtering.
+
+    • If both fields are empty after stripping → return a generic
+      'normal study' bullet list.
+    • Otherwise pass the raw text to the LLM with a brief instruction.
     """
-    def _is_trivial(s: str) -> bool:
-        return s is None or str(s).strip() in {"", "=", "{}", "[]", "\"\"", "null"}
 
-    if _is_trivial(payload.evidence) and _is_trivial(payload.summary):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Both 'evidence' and 'summary' are empty or placeholders. "
-                "Provide real text or structured JSON."
-            )
-        )
+    evidence_text = (payload.evidence or "").strip()
+    summary_text  = (payload.summary  or "").strip()
 
-    evidence_text = "" if _is_trivial(payload.evidence) else payload.evidence.strip()
-    summary_text  = "" if _is_trivial(payload.summary)  else payload.summary.strip()
-
+    # -------- case 1: absolutely nothing provided ------------------------
     if not evidence_text and not summary_text:
-        raise HTTPException(
-            400,
-            "Provide at least one of these fields: evidence / summary."
+        generic_prompt = (
+            "You are a senior consultant radiologist.\n\n"
+            "No additional AI evidence or clinical summary has been supplied. "
+            "Write 5–7 British-English bullet points for a NORMAL chest X-ray "
+            "report (clear lungs, normal mediastinum, no pleural effusion, "
+            "no pneumothorax, no acute bony abnormality)."
         )
+        report = call_groq(
+            generic_prompt,
+            model="openai/gpt-oss-120b",
+            max_completion_tokens=512,
+            temperature=0.6
+        )
+        return JSONResponse({"report": report})
 
-    # ---------------- build prompt ----------------------------------------
+    # -------- case 2: use caller-supplied strings verbatim ---------------
     prompt = (
-    "You are a senior consultant radiologist. Write a polished, professional "
-    "chest-X-ray report in British English.\n\n"
-    f"Evidence (verbatim):\n{payload.evidence}\n\n"
-    "Your output **must be 5–7 markdown bullets**, but each bullet may be "
-    "one or two sentences long. Use formal language (e.g. “No radiographic "
-    "evidence of …”; “Cardiothoracic ratio is within normal limits”).\n\n"
-    "- Begin with objective **findings**.\n"
-    "- Provide an **impression** (pneumonia: present / absent / indeterminate).\n"
-    "- Add succinct **recommendations** if appropriate."
-)
+        "You are a senior consultant radiologist.\n\n"
+        "### Caller-supplied clinical summary (consider this 100 % confirmed)\n"
+        f"{summary_text or '*None provided*'}\n\n"
+        "### Caller-supplied evidence / probabilities / free text (verbatim)\n"
+        f"{evidence_text or '*None provided*'}\n\n"
+        "Using *all* of the text above, write **exactly 5–7 bullet points** "
+        "in British English:\n"
+        " - Begin with the pneumonia conclusion from the summary (if present).\n"
+        " - Then comment on any other findings suggested by the evidence.\n"
+        "Do **not** add headings, dates or patient identifiers.\n\n"
+        "Begin bullet list:"
+    )
 
-    # ---------------- call Groq -------------------------------------------
     report = call_groq(
         prompt,
         model="openai/gpt-oss-120b",
-        max_completion_tokens=8192,
+        max_completion_tokens=1024,
         temperature=0.7,
         top_p=1,
         reasoning_effort="medium"
     )
     return JSONResponse({"report": report})
+
 # -----------------------------------------------------------------
 #  NEW ENDPOINT: /vision_report  – GPT-4-o (120 B) image analysis
 # -----------------------------------------------------------------

@@ -262,54 +262,65 @@ async def report_endpoint(
 
 # ---------- /llmreport  (pass-through version) ------------------------------
 # ---------- /llmreport  (pass-everything version) --------------------------
+# ---------- /llmreport  (quoted-block version) ----------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     """
-    Forward *exactly* what the caller sends in `evidence` and `summary`
-    to GPT-OSS-120B.  No parsing, no placeholder filtering.
-
-    • If both fields are empty after stripping → return a generic
-      'normal study' bullet list.
-    • Otherwise pass the raw text to the LLM with a brief instruction.
+    Simply forwards the caller's `summary` and `evidence` in quoted blocks.
+    GPT-OSS-120B is instructed to read them and produce 5-7 bullet points.
     """
 
     evidence_text = (payload.evidence or "").strip()
     summary_text  = (payload.summary  or "").strip()
 
-    # -------- case 1: absolutely nothing provided ------------------------
+    # if literally nothing, fall back to a generic normal report
     if not evidence_text and not summary_text:
-        generic_prompt = (
+        prompt = (
             "You are a senior consultant radiologist.\n\n"
-            "No additional AI evidence or clinical summary has been supplied. "
-            "Write 5–7 British-English bullet points for a NORMAL chest X-ray "
-            "report (clear lungs, normal mediastinum, no pleural effusion, "
-            "no pneumothorax, no acute bony abnormality)."
+            "No AI evidence or clinical summary was provided. "
+            "Write 5–7 bullet points stating the chest X-ray is normal "
+            "and reassuring."
         )
         report = call_groq(
-            generic_prompt,
+            prompt,
             model="openai/gpt-oss-120b",
             max_completion_tokens=512,
-            temperature=0.6
+            temperature=0.6,
+            top_p=1,
+            reasoning_effort="medium"
         )
         return JSONResponse({"report": report})
 
-    # -------- case 2: use caller-supplied strings verbatim ---------------
-    prompt = (
-        "You are a senior consultant radiologist.\n\n"
-        "### Caller-supplied clinical summary (consider this 100 % confirmed)\n"
-        f"{summary_text or '*None provided*'}\n\n"
-        "### Caller-supplied evidence / probabilities / free text (verbatim)\n"
-        f"{evidence_text or '*None provided*'}\n\n"
-        "Using *all* of the text above, write **exactly 5–7 bullet points** "
-        "in British English:\n"
-        " - Begin with the pneumonia conclusion from the summary (if present).\n"
-        " - Then comment on any other findings suggested by the evidence.\n"
-        "Do **not** add headings, dates or patient identifiers.\n\n"
-        "Begin bullet list:"
-    )
+    # ---------------- messages payload -----------------------------------
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a senior consultant radiologist. Read the caller-supplied "
+                "summary and evidence (both inside triple back-ticks) and then "
+                "write **exactly 5–7 bullet points** in British English:\n"
+                " • Begin with the pneumonia conclusion stated in the summary.\n"
+                " • Then comment on any other findings suggested by the evidence.\n"
+                "Do NOT add headings, dates or patient identifiers."
+            )
+        },
+        {
+            "role": "user",
+            "content": (
+                "### Confirmed summary\n"
+                "```text\n"
+                f"{summary_text or 'None provided'}\n"
+                "```\n\n"
+                "### Raw evidence / probabilities\n"
+                "```text\n"
+                f"{evidence_text or 'None provided'}\n"
+                "```"
+            )
+        }
+    ]
 
     report = call_groq(
-        prompt,
+        messages,
         model="openai/gpt-oss-120b",
         max_completion_tokens=1024,
         temperature=0.7,

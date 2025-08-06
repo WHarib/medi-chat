@@ -7,7 +7,8 @@
 import os
 import io
 import json
-from typing import Dict, Any, List, Optional
+import re
+from typing import Dict, Any, List, Optional, Union
 
 import torch
 import numpy as np
@@ -116,16 +117,28 @@ def classify_image(img: Image.Image) -> Dict[str, Any]:
     }
 
 
-def call_groq(prompt: str) -> str:
-    """Groq chat-completion wrapper."""
+def call_groq(prompt_or_messages: Union[str, List[Dict[str, str]]]) -> str:
+    """
+    Wrapper for Groq chat-completion.
+    Accepts either:
+      • a single prompt string  → wrapped as user message
+      • a list of messages      → sent as-is
+    """
     if not GROQ_API_KEY:
         raise HTTPException(500, "GROQ_API_KEY is not configured.")
+
+    if isinstance(prompt_or_messages, str):
+        messages = [{"role": "user", "content": prompt_or_messages}]
+    else:
+        messages = prompt_or_messages
+
     client = Groq(api_key=GROQ_API_KEY)
     resp = client.chat.completions.create(
         model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}]
+        messages=messages
     )
     return resp.choices[0].message.content.strip()
+
 
 # =========================
 # ---- INPUT MODELS -------
@@ -133,6 +146,7 @@ def call_groq(prompt: str) -> str:
 class LLMReportIn(BaseModel):
     evidence: str
     summary: Optional[str] = None
+
 
 # =========================
 # ------- ENDPOINTS -------
@@ -144,6 +158,7 @@ def root():
         "message": "Use /predict_chexpert, /chat, /report or /llmreport."
     }
 
+
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -153,27 +168,88 @@ async def predict_chexpert(file: UploadFile = File(...)):
     return JSONResponse(classify_image(pil))
 
 # ----------------------------------------------------------------
-# /chat  – *Hard-wired* “no pneumonia” narrative
+# /chat  – narrative advice (Groq LLM, now *confident* on “no pneumonia”)
 # ----------------------------------------------------------------
-NO_PNEUMONIA_HEADER = "No evidence of pneumonia is seen on this image."
-NO_PNEUMONIA_INSTR  = (
-    "Reassure the clinical team. Comment on clear lung fields, normal "
-    "mediastinal contours, and absence of radiographic abnormalities. "
-    "**Do not express diagnostic uncertainty.**"
-)
+NO_PNEUMONIA_SET = {"no_evidence", "no pneumonia", "negative", "clear"}
+YES_PNEUMONIA_SET = {"pneumonia", "positive"}
+UNCERTAIN_SET = {"unsure", "uncertain", "maybe", "equivocal"}
+
+
+def normalise_label(raw: str) -> str:
+    """Lower-case, collapse spaces, trim."""
+    return re.sub(r"\s+", " ", raw or "").strip().lower()
+
+
+def build_messages(label: str,
+                   buckets: Dict[str, Any],
+                   votes: List[Any]) -> List[Dict[str, str]]:
+    """Return a list of messages adhering to the chosen tone."""
+    if label in YES_PNEUMONIA_SET:
+        header = "This image demonstrates pneumonia."
+        instr  = (
+            "Describe the anatomical location, radiographic features, and "
+            "potential severity."
+        )
+        system = (
+            "You are a senior consultant radiologist. When the assessment "
+            "summary indicates pneumonia, you must confidently describe the "
+            "findings and comment on severity. You may recommend relevant "
+            "management steps."
+        )
+
+    elif label in NO_PNEUMONIA_SET:
+        header = "No evidence of pneumonia is seen on this image."
+        instr  = (
+            "Reassure the clinical team. Comment on clear lung fields, "
+            "normal mediastinal contours, and absence of radiographic "
+            "abnormalities. **Do not express diagnostic uncertainty or "
+            "recommend further imaging for pneumonia.**"
+        )
+        system = (
+            "You are a senior consultant radiologist. When the assessment "
+            "summary states 'No evidence of pneumonia', you must give a clear, "
+            "reassuring report. Do NOT express uncertainty, and do NOT suggest "
+            "additional imaging or tests unless another significant abnormality "
+            "is identified."
+        )
+
+    else:  # uncertain
+        header = "Findings are uncertain for pneumonia."
+        instr  = (
+            "Recommend appropriate next steps, such as clinical correlation or "
+            "repeat imaging."
+        )
+        system = (
+            "You are a senior consultant radiologist. When findings are "
+            "uncertain, you may advise reasonable follow-up steps, but avoid "
+            "overstating risk."
+        )
+
+    user_msg = (
+        f"Assessment Summary: {header}\n\n"
+        f"Supporting data:\n{json.dumps({'buckets': buckets, 'votes': votes}, indent=2)}\n\n"
+        f"Instruction: {instr}"
+    )
+
+    return [
+        {"role": "system", "content": system},
+        {"role": "user",   "content": user_msg}
+    ]
+
 
 @app.post("/chat")
 async def chat_endpoint(
     file: UploadFile = File(...),
-    other_models: str = Form("")
+    other_models: str = Form(""),
+    final_label: str = Form("")   # optional explicit label
 ):
     # ---- image sanity check -----------------------------------------------
     try:
-        pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
+        Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
-    # ---- still parse legacy other_models for completeness ------------------
+    # ---- parse optional results -------------------------------------------
     try:
         merged = json.loads(other_models or "{}")
         if not isinstance(merged, dict):
@@ -184,40 +260,39 @@ async def chat_endpoint(
             "Invalid 'other_models' format – must be a JSON object."
         )
 
-    # ---- build prompt (no branching) --------------------------------------
-    prompt = (
-        "You are a senior consultant radiologist.\n\n"
-        f"Assessment Summary: {NO_PNEUMONIA_HEADER}\n\n"
-        "Supporting data (for context only):\n"
-        f"{json.dumps(merged, indent=2)}\n\n"
-        f"Instruction: {NO_PNEUMONIA_INSTR}"
-    )
-    answer = call_groq(prompt)
+    label = normalise_label(final_label) or normalise_label(merged.get("final_label", "")) or "unsure"
+    buckets = merged.get("buckets", {})
+    votes   = merged.get("votes", [])
 
-    # ---- response ----------------------------------------------------------
+    # ---- build and send ----------------------------------------------------
+    messages = build_messages(label, buckets, votes)
+    answer   = call_groq(messages)
+
     return JSONResponse({
         "answer":      answer,
-        "final_label": "no_evidence (hard-wired)",
-        **merged
+        "final_label": label,
+        "buckets":     buckets,
+        "votes":       votes
     })
 
 # ----------------------------------------------------------------
-# The remaining endpoints are unchanged
+# /report  – template report (unchanged, but uses same call_groq)
 # ----------------------------------------------------------------
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
     final_label: str = Form(...)
 ):
-    # keep original branching for /report
-    if final_label.lower().strip() == "pneumonia":
+    label_norm = normalise_label(final_label)
+
+    if label_norm in YES_PNEUMONIA_SET:
         label_text = "This image demonstrates pneumonia."
         detail = (
             "Draft 5–7 bullet points focusing on the presence of pneumonia, "
-            "including anatomical location, salient radiographic findings, "
-            "and management suggestions."
+            "including anatomical location, salient radiographic findings, and "
+            "management suggestions."
         )
-    elif final_label.lower().strip() == "no_evidence":
+    elif label_norm in NO_PNEUMONIA_SET:
         label_text = "No evidence of pneumonia is seen on this image."
         detail = (
             "Draft 5–7 reassuring bullet points describing the normal chest "
@@ -227,7 +302,7 @@ async def report_endpoint(
     else:
         label_text = "Findings are uncertain for pneumonia."
         detail = (
-            "Draft 5–7 bullet points summarising the ambiguity, notable "
+            "Draft 5–7 bullet points summaris­ing the ambiguity, notable "
             "observations, and suggested next steps for clinical evaluation."
         )
 
@@ -239,10 +314,13 @@ async def report_endpoint(
     report = call_groq(prompt)
     return JSONResponse({
         "report":      report,
-        "final_label": final_label,
+        "final_label": label_norm,
         "label_text":  label_text
     })
 
+# ----------------------------------------------------------------
+# /llmreport  – evidence-rich report (unchanged)
+# ----------------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     if not payload.evidence.strip():
@@ -251,9 +329,9 @@ async def llmreport_endpoint(payload: LLMReportIn):
     PROMPT = (
         "You are a senior consultant radiologist.\n"
         "Use ALL available evidence (model outputs, summaries, etc.) to write "
-        "a chest X-ray report focused on the presence or absence of "
-        "**pneumonia**. This is your primary diagnostic concern. Also comment "
-        "briefly on the general appearance of the X-ray.\n\n"
+        "a chest X-ray report focused on the presence or absence of **pneumonia**. "
+        "This is your primary diagnostic concern. Also comment briefly on the "
+        "general appearance of the X-ray.\n\n"
         f"Evidence:\n{payload.evidence}\n\n"
         "Write 5–7 bullet points using markdown dashes:\n"
         "- Findings (objective radiological observations)\n"

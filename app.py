@@ -249,36 +249,58 @@ def labels_from_any_json(blob: str) -> List[str]:
 async def chat_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    final_label: str = Form(""),
+    final_label: str = Form("", description="Optional explicit label"),
     other_models: str = Form(""),
 ) -> JSONResponse:
+    # A) quick image sanity-check
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}") from exc
 
+    # ------------------------------------------------------------------
+    # B) collect *all* possible label hints -----------------------------
+    # ------------------------------------------------------------------
     form = await request.form()
-    raw_candidates = [
-        final_label,
-        form.get("json", ""),
-        other_models,
-        form.get("other_models", ""),
-    ]
-    for blob in (
-        other_models,
-        form.get("json", ""),
-        form.get("other_models", ""),
-    ):
-        raw_candidates += labels_from_any_json(blob or "")
 
+    raw_candidates: List[str] = []
+
+    # ❶ explicit field wins if present
+    if final_label:
+        raw_candidates.append(final_label)
+
+    # ❷ json blob you pass (the list with {"final_label": ...})
+    json_blob = form.get("json", "")
+    try:
+        blob_obj = json.loads(json_blob)
+        if isinstance(blob_obj, dict) and "final_label" in blob_obj:
+            raw_candidates.append(str(blob_obj["final_label"]))
+        elif isinstance(blob_obj, list):
+            for itm in blob_obj:
+                if isinstance(itm, dict) and "final_label" in itm:
+                    raw_candidates.append(str(itm["final_label"]))
+    except Exception:
+        pass  # silently ignore malformed JSON
+
+    # ❸ optional ‘other_models’ field remains unchanged
+    raw_candidates += [other_models, form.get("other_models", "")]
+    raw_candidates += labels_from_any_json(other_models or "")
+    raw_candidates += labels_from_any_json(form.get("other_models", "") or "")
+
+    # ------------------------------------------------------------------
+    # C) choose label as before ----------------------------------------
+    # ------------------------------------------------------------------
     chosen_label = next(
         (detect_label(c) for c in raw_candidates if detect_label(c)), "unsure"
     )
     if chosen_label == "unsure" and all(not c.strip() for c in raw_candidates):
         chosen_label = "no_evidence"
 
+    # ------------------------------------------------------------------
+    # D) optional extra context for the prompt -------------------------
+    # ------------------------------------------------------------------
     try:
-        ctx = json.loads(other_models or form.get("json", "") or "{}")
+        ctx = json.loads(other_models or json_blob or "{}")
         if not isinstance(ctx, dict):
             ctx = {}
     except Exception:

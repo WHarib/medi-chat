@@ -119,7 +119,7 @@ class LLMReportIn(BaseModel):
     summary: Optional[str] = None
 
 # ------------------------------------------------
-# ENDPOINTS (predict_chexpert, chat, report unchanged)
+# ENDPOINTS  (predict_chexpert, chat, report unchanged)
 # ------------------------------------------------
 @app.get("/")
 def root():
@@ -134,7 +134,7 @@ async def predict_chexpert(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}")
 
-# ---------- /chat (unchanged from previous working version) -----------------
+# ---------- /chat (unchanged) -----------------------------------------------
 LABEL_SET = {"pneumonia", "no_evidence", "unsure"}
 SYS_TEMPLATES = {
     "pneumonia":
@@ -260,33 +260,32 @@ async def report_endpoint(
     report = call_groq(prompt)   # default text model
     return JSONResponse({"report": report, "final_label": lbl})
 
-# ---------- /llmreport  ------------------------------------------------------
+# ---------- /llmreport  (fixed) ---------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     """
-    Accepts payload.evidence as JSON or plain text.
-    If JSON, extracts probabilities & final_label; otherwise falls back
-    to free-text behaviour.  Always returns 5–7 bullet points.
+    Accepts `evidence` as JSON or plain text.
+    Handles invalid JSON gracefully.
+    Always returns 5–7 bullet points in British English.
     """
     raw = payload.evidence.strip()
     if not raw:
         raise HTTPException(400, "Field 'evidence' is empty.")
 
-    # try to parse JSON evidence
     resolved_label: str = ""
     probs: List[float] = []
     free_text_parts: List[str] = []
+
+    parsed: Union[dict, list] = {}          # ensure name exists
     try:
         parsed = json.loads(raw)
-        # evidence might be a dict or list of dicts
         dicts = parsed if isinstance(parsed, list) else [parsed]
         for block in dicts:
             if isinstance(block, dict):
                 if not resolved_label and "final_label" in block:
-                    resolved_label = block["final_label"]
+                    resolved_label = str(block["final_label"])
                 if "probabilities" in block and isinstance(block["probabilities"], list):
                     probs = block["probabilities"]
-                # keep any string comments
                 if "answer" in block and isinstance(block["answer"], str):
                     free_text_parts.append(block["answer"])
     except Exception:
@@ -303,18 +302,16 @@ async def llmreport_endpoint(payload: LLMReportIn):
     if not resolved_label:
         resolved_label = "unsure"
 
-    # build structured prompt
     preamble = (
         "You are a senior consultant radiologist.\n"
         "Below you have:\n"
         f" • **final_label**: {resolved_label}\n"
-        " • **probabilities** for 14 CheXpert labels (same order as the list below).\n"
+        " • **probabilities** for 14 CheXpert findings.\n"
         " • Free-text notes from other models / clinicians.\n\n"
         "Use **all available information** to write exactly **5–7 bullet points** "
-        "in British English:\n"
-        " - Begin with the presence or absence of **pneumonia**.\n"
-        " - Then mention any other pertinent findings.\n"
-        "Avoid headings, patient identifiers, or dates.\n\n"
+        "in British English, beginning with the presence or absence of "
+        "**pneumonia**.\n"
+        "Avoid headings, dates, or patient identifiers.\n\n"
         "### CheXpert probabilities\n"
         f"{json.dumps(probs, indent=2) if probs else 'Not provided'}\n\n"
         "### Extra notes\n"

@@ -124,9 +124,11 @@ def root():
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
+        return JSONResponse(classify_image(pil))
     except Exception as exc:
-        raise HTTPException(400, f"Bad image: {exc}")
-    return JSONResponse(classify_image(pil))
+        # Log exc here if you like
+        raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}")
+
 
 # ---------------  THIS IS THE ONLY PART THAT CHANGED -------------
 # /chat – always “no pneumonia”, reassuring tone

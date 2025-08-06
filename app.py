@@ -260,16 +260,9 @@ async def report_endpoint(
     report = call_groq(prompt)   # default text model
     return JSONResponse({"report": report, "final_label": lbl})
 
-# ---------- /llmreport  (fixed) ---------------------------------------------
-# ---------- /llmreport  (patched) -------------------------------------------
+# ---------- /llmreport  (syntax-fix) ----------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
-    """
-    Accepts `evidence` as JSON OR plain text.
-    Works with wrapper objects like:
-        [{"evidence": "...", "summary": "..."}]
-    Always returns 5–7 British-English bullet points.
-    """
     raw = payload.evidence.strip()
     if not raw:
         raise HTTPException(400, "Field 'evidence' is empty.")
@@ -278,64 +271,49 @@ async def llmreport_endpoint(payload: LLMReportIn):
     probs: List[float] = []
     free_text_parts: List[str] = []
 
-    # ---------- 1. try to parse JSON ---------------------------------------
     parsed: Union[dict, list] = {}
     try:
         parsed = json.loads(raw)
+        dicts = parsed if isinstance(parsed, list) else [parsed]
+        for block in dicts:
+            if isinstance(block, dict):
+                if not resolved_label and "final_label" in block:
+                    resolved_label = str(block["final_label"])
+                if "probabilities" in block and isinstance(block["probabilities"], list):
+                    probs = block["probabilities"]
+                for k in ("answer", "evidence", "summary"):
+                    if k in block and isinstance(block[k], str):
+                        free_text_parts.append(block[k])
+                if block.get("pneumonia_present") is True and not resolved_label:
+                    resolved_label = "pneumonia"
+                if block.get("pneumonia_present") is False and not resolved_label:
+                    resolved_label = "no_evidence"
     except Exception:
-        pass                                           # not JSON
-
-    # wrap non-list into list so we can iterate uniformly
-    items = parsed if isinstance(parsed, list) else [parsed]
-
-    for itm in items:
-        if not isinstance(itm, dict):
-            continue
-        # a) nested evidence / summary strings
-        if "evidence" in itm and isinstance(itm["evidence"], str):
-            free_text_parts.append(itm["evidence"])
-        if "summary" in itm and isinstance(itm["summary"], str):
-            free_text_parts.append(itm["summary"])
-
-        # b) flat keys (the old schema)
-        if "final_label" in itm and not resolved_label:
-            resolved_label = str(itm["final_label"])
-        if "probabilities" in itm and isinstance(itm["probabilities"], list):
-            probs = itm["probabilities"]
-        if "answer" in itm and isinstance(itm["answer"], str):
-            free_text_parts.append(itm["answer"])
-        if itm.get("pneumonia_present") is True and not resolved_label:
-            resolved_label = "pneumonia"
-        if itm.get("pneumonia_present") is False and not resolved_label:
-            resolved_label = "no_evidence"
-
-    # ---------- 2. fall back to raw text if nothing parsed -----------------
-    if not free_text_parts and not probs:
         free_text_parts.append(raw)
 
-    # ---------- 3. infer label from free text if still missing -------------
     if not resolved_label:
-        txt_blob = " ".join(free_text_parts).lower()
-        if "pneumonia present: true" in txt_blob or "pneumonia: true" in txt_blob:
+        txt = " ".join(free_text_parts).lower()
+        if "pneumonia present: true" in txt:
             resolved_label = "pneumonia"
-        elif "pneumonia present: false" in txt_blob or "no signs of pneumonia" in txt_blob:
+        elif "pneumonia present: false" in txt or "no evidence of pneumonia" in txt:
             resolved_label = "no_evidence"
         else:
             resolved_label = "unsure"
 
-    # ---------- 4. build prompt -------------------------------------------
+    # ---------- build prompt strings *first* -------------------------------
+    probs_block  = json.dumps(probs, indent=2) if probs else "Not provided"
+    notes_block  = "\n".join(f"- {s}" for s in free_text_parts) if free_text_parts else "None"
+
     prompt = (
         "You are a senior consultant radiologist.\n\n"
         f"**final_label:** {resolved_label}\n\n"
         "### CheXpert probabilities\n"
-        f"{json.dumps(probs, indent=2) if probs else 'Not provided'}\n\n"
-        "### Free-text evidence and summaries\n"
-        f"{'\\n'.join('- ' + s for s in free_text_parts) if free_text_parts else 'None'}\n\n"
-        "Using ALL the information above, write **exactly 5–7 bullet points** "
-        "in British English:\n"
-        " - Start with the presence or absence of **pneumonia**.\n"
-        " - Then mention any other pertinent findings.\n"
-        "Do NOT add headings, dates or patient identifiers.\n\n"
+        f"{probs_block}\n\n"
+        "### Free-text evidence & summaries\n"
+        f"{notes_block}\n\n"
+        "Using ALL the information above, write exactly **5–7 bullet points** "
+        "in British English (begin with pneumonia presence/absence). "
+        "Avoid headings, dates, or patient identifiers.\n\n"
         "Begin bullet list:"
     )
 
@@ -348,4 +326,5 @@ async def llmreport_endpoint(payload: LLMReportIn):
         reasoning_effort="medium"
     )
     return JSONResponse({"report": report})
+
 

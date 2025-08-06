@@ -329,13 +329,13 @@ async def report_endpoint(
     return JSONResponse({"report": report, "final_label": lbl})
 
 
-# ---------- /llmreport -------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
-    Caller supplies `evidence` + optional `summary`.
-    We embed both inside a fixed instruction and produce 5–7 bullet points.
-    Raises 400 if **both** strings are empty.
+    Turns caller-supplied `evidence` + `summary` into 5–7 qualitative
+    bullet-points, written like a senior consultant radiologist.
+    - No numeric probabilities or thresholds are allowed in the output.
+    - Raises 400 if both fields are empty.
     """
 
     evidence_text = (payload.evidence or "").strip()
@@ -353,9 +353,14 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
                 "You are a senior consultant radiologist. Read the caller-supplied "
                 "summary and evidence (both inside triple back-ticks) and then "
                 "write **exactly 5–7 bullet points** in British English:\n"
-                " • Begin with the pneumonia conclusion stated in the summary.\n"
-                " • Then comment on any other findings suggested by the evidence.\n"
-                "Do NOT add headings, dates or patient identifiers."
+                " • Begin with a clear statement confirming whether pneumonia is present.\n"
+                " • Comment qualitatively on any other relevant thoracic findings.\n"
+                "IMPORTANT STYLE RULES:\n"
+                " – Do **NOT** include any numbers, percentages, thresholds or raw data.\n"
+                " – Do **NOT** reference the summary/evidence, the model, or AI.\n"
+                " – Use concise, professional radiology language suitable for a report.\n"
+                " – Do **NOT** add headings, dates, patient identifiers or recommendations "
+                "   for further imaging unless uncertainty genuinely exists."
             ),
         },
         {
@@ -381,7 +386,6 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         reasoning_effort="medium",
     )
     return JSONResponse({"report": report})
-
 
 # ---------- /vision_report ---------------------------------------------------
 @app.post("/vision_report")

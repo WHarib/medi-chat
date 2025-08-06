@@ -126,7 +126,7 @@ def root():
     return {"ok": True,
             "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
-# ---------- /predict_chexpert ------------------------------------------------
+# ---------- /predict_chexpert -----------------------------------------------
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -180,13 +180,11 @@ async def chat_endpoint(
     final_label: str = Form(""),
     other_models: str = Form("")
 ):
-    # --- verify image (content not used by LLM branch) ----------------------
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
-    # --- parse optional JSON diagnostics -----------------------------------
     try:
         other = json.loads(other_models or "{}")
         if not isinstance(other, dict):
@@ -196,7 +194,7 @@ async def chat_endpoint(
 
     label = normalise_label(final_label or other.get("final_label") or "unsure")
     if label not in LABEL_SET:
-        label = "unsure"                              # fallback guard
+        label = "unsure"
 
     messages = [
         {"role": "system", "content": SYS_TEMPLATES[label]},
@@ -253,10 +251,13 @@ async def llmreport_endpoint(payload: LLMReportIn):
 
     PROMPT = (
         "You are a senior consultant radiologist.\n"
-        "Using **all** the evidence below, write a concise chest X-ray report focused "
-        "on the presence or absence of **pneumonia**. Use 5–7 bullet points only. "
-        "**Do not** include headings, patient identifiers, dates or any boiler-plate.\n\n"
+        "Using **all** the evidence below, write **exactly 5–7 bullet points** "
+        "focused on the presence or absence of **pneumonia** and the general "
+        "appearance of the chest X-ray.\n\n"
+        "Your **entire output must be those bullet points only**, each starting "
+        "with '- '. Do **not** include headings, patient details, dates or any "
+        "other text.\n\n"
         f"Evidence:\n{payload.evidence}\n\n"
-        "Write bullet points in markdown format (starting each line with '- ')."
+        "Begin bullet list:"
     )
     return JSONResponse({"report": call_groq(PROMPT)})

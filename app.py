@@ -9,7 +9,6 @@ from typing import Dict, Any, List, Optional, Union
 import torch, numpy as np
 from PIL import Image
 from torchvision import transforms, models
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from groq import Groq
@@ -172,9 +171,6 @@ USER_TEMPLATES = {
 }
 
 def detect_label(text: str) -> str:
-    """
-    Fuzzy-match any snippet to one of the three canonical labels.
-    """
     t = (text or "").lower()
     if "pneum" in t:
         return "pneumonia"
@@ -185,59 +181,70 @@ def detect_label(text: str) -> str:
     return ""
 
 
+def labels_from_any_json(blob: str) -> List[str]:
+    """Return every final_label found inside a dict **or** list."""
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return []
+    found: List[str] = []
+    if isinstance(data, dict):
+        if "final_label" in data:
+            found.append(str(data["final_label"]))
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and "final_label" in item:
+                found.append(str(item["final_label"]))
+    return found
+
+
 @app.post("/chat")
 async def chat_endpoint(
     request: Request,
     file: UploadFile = File(...),
-    final_label: str = Form("", description="Preferred field for the label"),
-    other_models: str = Form("", description="Optional JSON blob from ensemble")
+    final_label: str = Form(""),
+    other_models: str = Form("")
 ):
-    # ------ check the image -------------------------------------------------
+    # --- validate image -----------------------------------------------------
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
-    # ------ collect every form field as raw strings -------------------------
+    # --- harvest raw strings -------------------------------------------------
     form = await request.form()
     raw_candidates: List[str] = [
         final_label,
-        form.get("json", ""),          # n8n pattern
+        form.get("json", ""),
         other_models,
-        form.get("other_models", "")   # alias guard
+        form.get("other_models", "")
     ]
 
-    # also look inside JSON blobs for "final_label"
+    # --- extract nested labels from any JSON blobs --------------------------
     for blob in (other_models, form.get("json", ""), form.get("other_models", "")):
-        try:
-            data = json.loads(blob) if blob else {}
-            if isinstance(data, dict):
-                raw_candidates.append(str(data.get("final_label", "")))
-        except Exception:
-            pass
+        for lbl in labels_from_any_json(blob or ""):
+            raw_candidates.append(lbl)
 
-    # ------ pick the first match -------------------------------------------
+    # --- choose the first recognised label ----------------------------------
     label = next((detect_label(c) for c in raw_candidates if detect_label(c)), "unsure")
 
-    # ------ re-parse other_models for prompt display ------------------------
+    # --- build prompt --------------------------------------------------------
     try:
-        other = json.loads(other_models or form.get("json", "") or "{}")
-        if not isinstance(other, dict):
-            other = {}
+        ctx = json.loads(other_models or form.get("json", "") or "{}")
+        if not isinstance(ctx, dict):
+            ctx = {}
     except Exception:
-        other = {}
+        ctx = {}
 
-    # ------ build prompt and call Groq --------------------------------------
     messages = [
         {"role": "system", "content": SYS_TEMPLATES[label]},
         {"role": "user",
-         "content": USER_TEMPLATES[label].format(
-             data=json.dumps(other, indent=2))}
+         "content": USER_TEMPLATES[label].format(data=json.dumps(ctx, indent=2))}
     ]
     answer = call_groq(messages)
-    return JSONResponse({"answer": answer, "final_label": label, **other})
+    return JSONResponse({"answer": answer, "final_label": label, **ctx})
 
-# ---------- /report ----------------------------------------------------------
+# ---------- /report & /llmreport (unchanged) ---------------------------------
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
@@ -274,7 +281,6 @@ async def report_endpoint(
     )
     return JSONResponse({"report": call_groq(prompt), "final_label": lbl})
 
-# ---------- /llmreport -------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     if not payload.evidence.strip():

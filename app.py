@@ -262,27 +262,26 @@ async def report_endpoint(
 
 # ---------- /llmreport  (pass-through version) ------------------------------
 @app.post("/llmreport")
-async def llmreport_endpoint(request: Request):
+async def llmreport_endpoint(payload: LLMReportIn):
     """
-    Accepts either JSON or form-data.
-    • `evidence`  (or `evidences`) – raw probabilities / model output
-    • `summary`   – confirmed narrative from previous step
-
-    Both fields are forwarded **as-is** to GPT-OSS-120B.
-    The model is instructed that the summary is definitive regarding pneumonia.
+    Produces a radiology report from free-text evidence and/or summary.
+    Rejects empty or placeholder inputs with 400 (client error) instead
+    of 500 (server error).
     """
-    # ---------------- read body flexibly -----------------------------------
-    if request.headers.get("content-type", "").startswith("application/json"):
-        body = await request.json()
-        evidence_text = body.get("evidence") or body.get("evidences", "")
-        summary_text  = body.get("summary", "")
-    else:
-        form = await request.form()
-        evidence_text = form.get("evidence") or form.get("evidences", "")
-        summary_text  = form.get("summary", "")
+    def _is_trivial(s: str) -> bool:
+        return s is None or str(s).strip() in {"", "=", "{}", "[]", "\"\"", "null"}
 
-    evidence_text = str(evidence_text).strip()
-    summary_text  = str(summary_text).strip()
+    if _is_trivial(payload.evidence) and _is_trivial(payload.summary):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Both 'evidence' and 'summary' are empty or placeholders. "
+                "Provide real text or structured JSON."
+            )
+        )
+
+    evidence_text = "" if _is_trivial(payload.evidence) else payload.evidence.strip()
+    summary_text  = "" if _is_trivial(payload.summary)  else payload.summary.strip()
 
     if not evidence_text and not summary_text:
         raise HTTPException(

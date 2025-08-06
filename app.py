@@ -82,17 +82,27 @@ def to_tensor(img: Image.Image) -> torch.Tensor:
 
 
 def classify_image(img: Image.Image) -> Dict[str, Any]:
+    """Run the CNN and return JSON-serialisable output."""
     model, thr = load_assets()
     with torch.no_grad():
         probs = torch.sigmoid(model(to_tensor(img))).cpu().numpy()[0]
+
     detected = [LABELS[i] for i, p in enumerate(probs) if p >= thr[i]] \
         or ["No abnormal findings detected"]
+
+    # --- Python types only (avoid NumPy scalars) ---------------------------
+    pneu_prob = float(probs[PNEUMONIA_IDX])
+    pneu_thr  = float(thr[PNEUMONIA_IDX])
+    pneu_flag = bool(pneu_prob >= pneu_thr)
+
     return {
         "labels": LABELS,
-        "probabilities": probs.tolist(),
-        "thresholds": thr.tolist(),
-        "detected": detected,
-        "pneumonia_present": probs[PNEUMONIA_IDX] >= thr[PNEUMONIA_IDX]
+        "probabilities": probs.tolist(),   # plain Python floats
+        "thresholds":    thr.tolist(),     # plain Python floats
+        "detected":      detected,
+        "pneumonia_probability": pneu_prob,
+        "pneumonia_threshold":   pneu_thr,
+        "pneumonia_present":     pneu_flag   # native bool, JSON-friendly
     }
 
 
@@ -126,13 +136,12 @@ async def predict_chexpert(file: UploadFile = File(...)):
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
         return JSONResponse(classify_image(pil))
     except Exception as exc:
-        # Log exc here if you like
         raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}")
 
 
-# ---------------  THIS IS THE ONLY PART THAT CHANGED -------------
+# ---------------  THIS SECTION UNCHANGED ------------------------
 # /chat – always “no pneumonia”, reassuring tone
-# -----------------------------------------------------------------
+# ----------------------------------------------------------------
 SYSTEM_TXT = (
     "You are a senior consultant radiologist. The imaging unequivocally shows "
     "NO radiographic evidence of pneumonia. Your task is to provide a concise, "
@@ -153,13 +162,11 @@ async def chat_endpoint(
     file: UploadFile = File(...),
     other_models: str = Form("")
 ):
-    # confirm the upload is an image (content not used further here)
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
-    # parse optional diagnostic context (ignored by logic, but passed through)
     try:
         models_json = json.loads(other_models or "{}")
         if not isinstance(models_json, dict):
@@ -174,15 +181,14 @@ async def chat_endpoint(
     answer = call_groq(messages)
     return JSONResponse({"answer": answer, **models_json})
 
-# -----------------------------------------------------------------
-# Remaining endpoints unchanged
-# -----------------------------------------------------------------
+# ----------------------------------------------------------------
+# /report and /llmreport remain as before
+# ----------------------------------------------------------------
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
     final_label: str = Form(...)
 ):
-    # kept untouched for convenience
     label = final_label.lower().strip()
     if label == "pneumonia":
         hdr = "This image demonstrates pneumonia."
@@ -204,6 +210,7 @@ async def report_endpoint(
         )
     report = call_groq(f"You are a senior radiologist.\n\nAssessment Summary: {hdr}\n\n{detail}")
     return JSONResponse({"report": report, "final_label": label})
+
 
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):

@@ -1,11 +1,6 @@
-# ---------------------------------------------------------------
-#            Medi-Chat API  –  CheXpert + Groq LLM back-end
-# ---------------------------------------------------------------
-# Complete file – paste over the existing app.py.
-# Changes vs. last version:
-#   • /llmreport no longer invents a “normal” report when both
-#     evidence and summary are empty – it raises HTTP 400 instead.
-# ---------------------------------------------------------------
+# ================================================================
+#                    Medi-Chat API (CheXpert + Groq)
+# ================================================================
 
 from __future__ import annotations
 
@@ -13,6 +8,7 @@ import base64
 import io
 import json
 import os
+import re
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 import numpy as np
@@ -24,9 +20,9 @@ from PIL import Image
 from pydantic import BaseModel
 from torchvision import models, transforms
 
-# ----------------------------------------------------------------
-# CONFIGURATION
-# ----------------------------------------------------------------
+# ------------------------------------------------
+# CONFIG
+# ------------------------------------------------
 LABELS: List[str] = [
     "No Finding",
     "Enlarged Cardiomediastinum",
@@ -62,9 +58,9 @@ os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 os.makedirs("/tmp/torch_cache", exist_ok=True)
 
-# ----------------------------------------------------------------
+# ------------------------------------------------
 # FASTAPI
-# ----------------------------------------------------------------
+# ------------------------------------------------
 app = FastAPI(
     title="Medi-Chat API (CheXpert + Groq)",
     docs_url="/docs",
@@ -82,12 +78,11 @@ _transform = transforms.Compose(
     ]
 )
 
-# ----------------------------------------------------------------
+# ------------------------------------------------
 # UTILITIES
-# ----------------------------------------------------------------
+# ------------------------------------------------
 def load_assets() -> tuple[torch.nn.Module, np.ndarray]:
     global _model, _thresholds
-
     if _model is None:
         mdl = models.densenet121(weights=None)
         mdl.classifier = torch.nn.Linear(mdl.classifier.in_features, len(LABELS))
@@ -98,7 +93,7 @@ def load_assets() -> tuple[torch.nn.Module, np.ndarray]:
     if _thresholds is None:
         with open(THRESHOLD_PATH, "r") as fh:
             thr_map = json.load(fh)
-        _thresholds = np.array([thr_map[label] for label in LABELS], dtype=np.float32)
+        _thresholds = np.array([thr_map[lbl] for lbl in LABELS], dtype=np.float32)
 
     return _model, _thresholds
 
@@ -138,6 +133,7 @@ def call_groq(
     max_completion_tokens: Optional[int] = None,
     **kwargs: Any,
 ) -> str:
+    """Universal wrapper round Groq chat-completion."""
     if GROQ_API_KEY is None:
         raise HTTPException(500, "GROQ_API_KEY not configured.")
 
@@ -156,17 +152,17 @@ def call_groq(
     return resp.choices[0].message.content.strip()
 
 
-# ----------------------------------------------------------------
-# Pydantic models
-# ----------------------------------------------------------------
+# ------------------------------------------------
+# Pydantic model
+# ------------------------------------------------
 class LLMReportIn(BaseModel):
     evidence: str
     summary: Optional[str] = None
 
 
-# ----------------------------------------------------------------
-# ROUTES
-# ----------------------------------------------------------------
+# ------------------------------------------------
+# ENDPOINTS
+# ------------------------------------------------
 @app.get("/")
 def root() -> Dict[str, Any]:
     return {
@@ -175,23 +171,175 @@ def root() -> Dict[str, Any]:
     }
 
 
+# ---------- /predict_chexpert ------------------------------------------------
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)) -> JSONResponse:
     try:
         pil = Image.open(io.BytesIO(await file.read())).convert("RGB")
         return JSONResponse(classify_image(pil))
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}") from exc
 
 
-# (chat and report endpoints unchanged from previous revision – omitted for brevity)
-# -----------------------------------------------------------------------
-# /llmreport – **NO FALL-BACK**: both fields must not be empty
-# -----------------------------------------------------------------------
+# ---------- /chat ------------------------------------------------------------
+LABEL_SET = {"pneumonia", "no_evidence", "unsure"}
+SYS_TEMPLATES = {
+    "pneumonia": (
+        "You are a senior consultant radiologist. The image shows pneumonia. "
+        "Provide a confident description of its anatomical location, radiographic "
+        "features and likely severity."
+    ),
+    "no_evidence": (
+        "You are a senior consultant radiologist. The image shows **no evidence "
+        "of pneumonia**. Provide a concise, reassuring statement in British "
+        "English, highlighting clear lungs and normal mediastinal contours. "
+        "Do **not** express diagnostic uncertainty or recommend further imaging."
+    ),
+    "unsure": (
+        "You are a senior consultant radiologist. Findings are equivocal for "
+        "pneumonia. Briefly state the uncertainty and outline sensible next steps."
+    ),
+}
+USER_TEMPLATES = {
+    "pneumonia": (
+        "Assessment summary: This image demonstrates pneumonia.\n\n"
+        "Supporting data:\n{data}\n\n"
+        "Instruction: Describe location and features."
+    ),
+    "no_evidence": (
+        "Assessment summary: No evidence of pneumonia is seen on this image.\n\n"
+        "Supporting data:\n{data}\n\n"
+        "Instruction: Reassure; do not express uncertainty."
+    ),
+    "unsure": (
+        "Assessment summary: Findings are uncertain for pneumonia.\n\n"
+        "Supporting data:\n{data}\n\n"
+        "Instruction: Suggest next steps."
+    ),
+}
+
+
+def detect_label(text: str) -> str:
+    t = (text or "").lower()
+    if "pneum" in t:
+        return "pneumonia"
+    if "no" in t and ("evid" in t or "pneumonia" in t):
+        return "no_evidence"
+    if any(k in t for k in ("unsure", "uncertain", "equivoc")):
+        return "unsure"
+    return ""
+
+
+def labels_from_any_json(blob: str) -> List[str]:
+    try:
+        data = json.loads(blob)
+    except Exception:
+        return []
+    found: List[str] = []
+    if isinstance(data, dict) and "final_label" in data:
+        found.append(str(data["final_label"]))
+    elif isinstance(data, list):
+        for itm in data:
+            if isinstance(itm, dict) and "final_label" in itm:
+                found.append(str(itm["final_label"]))
+    return found
+
+
+@app.post("/chat")
+async def chat_endpoint(
+    request: Request,
+    file: UploadFile = File(...),
+    final_label: str = Form(""),
+    other_models: str = Form(""),
+) -> JSONResponse:
+    try:
+        Image.open(io.BytesIO(await file.read())).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(400, f"Bad image: {exc}") from exc
+
+    form = await request.form()
+    raw_candidates = [
+        final_label,
+        form.get("json", ""),
+        other_models,
+        form.get("other_models", ""),
+    ]
+    for blob in (
+        other_models,
+        form.get("json", ""),
+        form.get("other_models", ""),
+    ):
+        raw_candidates += labels_from_any_json(blob or "")
+
+    chosen_label = next(
+        (detect_label(c) for c in raw_candidates if detect_label(c)), "unsure"
+    )
+    if chosen_label == "unsure" and all(not c.strip() for c in raw_candidates):
+        chosen_label = "no_evidence"
+
+    try:
+        ctx = json.loads(other_models or form.get("json", "") or "{}")
+        if not isinstance(ctx, dict):
+            ctx = {}
+    except Exception:
+        ctx = {}
+
+    messages = [
+        {"role": "system", "content": SYS_TEMPLATES[chosen_label]},
+        {
+            "role": "user",
+            "content": USER_TEMPLATES[chosen_label].format(
+                data=json.dumps(ctx, indent=2)
+            ),
+        },
+    ]
+    answer = call_groq(messages)
+    return JSONResponse({"answer": answer})
+
+
+# ---------- /report ----------------------------------------------------------
+@app.post("/report")
+async def report_endpoint(
+    file: UploadFile = File(...),
+    final_label: str = Form(...),
+) -> JSONResponse:
+    lbl = detect_label(final_label)
+    if lbl == "":
+        raise HTTPException(
+            400, "final_label must be pneumonia, no_evidence or unsure."
+        )
+
+    hdr_map = {
+        "pneumonia": "This image demonstrates pneumonia.",
+        "no_evidence": "No evidence of pneumonia is seen on this image.",
+        "unsure": "Findings are uncertain for pneumonia.",
+    }
+    detail_map = {
+        "pneumonia": "Draft 5–7 bullet points on pneumonia presence & features.",
+        "no_evidence": "Draft 5–7 reassuring bullet points on normal CXR; no uncertainty.",
+        "unsure": "Draft 5–7 bullet points on uncertainty & next steps.",
+    }
+
+    prompt = (
+        "You are a senior consultant radiologist.\n\n"
+        f"Assessment Summary: {hdr_map[lbl]}\n\n"
+        f"{detail_map[lbl]}"
+    )
+    report = call_groq(prompt)
+    return JSONResponse({"report": report, "final_label": lbl})
+
+
+# ---------- /llmreport -------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
+    """
+    Caller supplies `evidence` + optional `summary`.
+    We embed both inside a fixed instruction and produce 5–7 bullet points.
+    Raises 400 if **both** strings are empty.
+    """
+
     evidence_text = (payload.evidence or "").strip()
-    summary_text = (payload.summary or "").strip()
+    summary_text  = (payload.summary  or "").strip()
 
     if not evidence_text and not summary_text:
         raise HTTPException(
@@ -235,4 +383,56 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     return JSONResponse({"report": report})
 
 
-# /vision_report identical to previous revision – omitted for brevity
+# ---------- /vision_report ---------------------------------------------------
+@app.post("/vision_report")
+async def vision_report(
+    file: UploadFile = File(...),
+    extra_prompt: str = Form("", description="Optional extra instructions"),
+) -> JSONResponse:
+    """
+    Feed an image to *openai/gpt-oss-120b* via Groq.
+    The model is asked to:
+      1. Describe the image objectively.
+      2. Comment on any abnormalities (state ‘None seen’ if normal).
+      3. Provide a concise summary suitable for a clinical note.
+    """
+
+    try:
+        img_bytes: bytes = await file.read()
+        Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(400, f"Bad image: {exc}") from exc
+
+    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "png"
+    data_url = (
+        f"data:image/{ext};base64," + base64.b64encode(img_bytes).decode()
+    )
+
+    vision_messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Please perform **three tasks** on the chest X-ray below:\n"
+                        "1. **Objective description** of visible anatomy and features.\n"
+                        "2. **Comment on abnormalities** (state 'None seen' if normal).\n"
+                        "3. **Concise overall summary** (like senior radiologist).\n\n"
+                        f"{extra_prompt.strip()}"
+                    ).strip(),
+                },
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }
+    ]
+
+    answer = call_groq(
+        vision_messages,
+        model="openai/gpt-oss-120b",
+        temperature=0.3,
+        top_p=1,
+        reasoning_effort="medium",
+    )
+
+    return JSONResponse({"report": answer})

@@ -15,7 +15,7 @@ from groq import Groq
 from pydantic import BaseModel
 
 # ------------------------------------------------
-# CONFIG (unchanged)
+# CONFIG
 # ------------------------------------------------
 LABELS = [
     "No Finding", "Enlarged Cardiomediastinum", "Cardiomegaly", "Lung Opacity",
@@ -28,6 +28,7 @@ THRESHOLD_PATH = os.getenv("THRESHOLD_PATH", "thresholds.json")
 DEVICE         = ("cuda" if torch.cuda.is_available()
                   else ("mps" if torch.backends.mps.is_available() else "cpu"))
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
+# default model for most endpoints
 GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 PNEUMONIA_IDX  = LABELS.index("Pneumonia")
 
@@ -36,7 +37,7 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 os.makedirs("/tmp/torch_cache", exist_ok=True)
 
 # ------------------------------------------------
-# FASTAPI SETUP (unchanged)
+# FASTAPI APP
 # ------------------------------------------------
 app = FastAPI(title="Medi-Chat API (CheXpert + Groq)",
               docs_url="/docs", redoc_url="/redoc")
@@ -52,7 +53,7 @@ _transform = transforms.Compose([
 ])
 
 # ------------------------------------------------
-# UTILITIES (unchanged)
+# UTILITIES
 # ------------------------------------------------
 def load_assets():
     global _model, _thresholds
@@ -68,8 +69,10 @@ def load_assets():
         _thresholds = np.array([th_map[l] for l in LABELS], dtype=np.float32)
     return _model, _thresholds
 
+
 def to_tensor(img: Image.Image) -> torch.Tensor:
     return _transform(img).unsqueeze(0).to(DEVICE)
+
 
 def classify_image(img: Image.Image) -> Dict[str, Any]:
     model, thr = load_assets()
@@ -90,17 +93,29 @@ def classify_image(img: Image.Image) -> Dict[str, Any]:
         "pneumonia_present": pneu_flag
     }
 
-def call_groq(messages: Union[str, List[Dict[str, str]]]) -> str:
+
+def call_groq(
+    messages: Union[str, List[Dict[str, str]]],
+    model: str = GROQ_MODEL,
+    **kwargs
+) -> str:
+    """
+    Wrapper around Groq chat-completion with optional model override.
+    """
     if not GROQ_API_KEY:
         raise HTTPException(500, "GROQ_API_KEY not configured.")
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
     client = Groq(api_key=GROQ_API_KEY)
-    resp = client.chat.completions.create(model=GROQ_MODEL, messages=messages)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        **kwargs
+    )
     return resp.choices[0].message.content.strip()
 
 # ------------------------------------------------
-# Pydantic model (unchanged)
+# INPUT MODEL
 # ------------------------------------------------
 class LLMReportIn(BaseModel):
     evidence: str
@@ -114,6 +129,7 @@ def root():
     return {"ok": True,
             "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
+# ---------- /predict_chexpert ------------------------------------------------
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -122,8 +138,9 @@ async def predict_chexpert(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}")
 
-# ---------- DEBUG-ENABLED /chat --------------------------------------------
+# ---------- /chat  -----------------------------------------------------------
 LABEL_SET = {"pneumonia", "no_evidence", "unsure"}
+
 SYS_TEMPLATES = {
     "pneumonia":
         "You are a senior consultant radiologist. The image shows pneumonia. "
@@ -133,13 +150,12 @@ SYS_TEMPLATES = {
         "You are a senior consultant radiologist. The image shows **no evidence "
         "of pneumonia**. Provide a concise, reassuring statement in British "
         "English, highlighting clear lungs and normal mediastinal contours. "
-        "Do **not** express diagnostic uncertainty or recommend further imaging "
-        "for pneumonia.",
+        "Do **not** express diagnostic uncertainty or recommend further imaging.",
     "unsure":
         "You are a senior consultant radiologist. Findings are equivocal for "
-        "pneumonia. Briefly state the uncertainty and outline sensible next "
-        "steps (e.g. clinical correlation, follow-up imaging)."
+        "pneumonia. Briefly state the uncertainty and outline sensible next steps."
 }
+
 USER_TEMPLATES = {
     "pneumonia":
         "Assessment summary: This image demonstrates pneumonia.\n\n"
@@ -186,15 +202,12 @@ async def chat_endpoint(
     final_label: str = Form(""),
     other_models: str = Form("")
 ):
-    # 1) Validate image
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
-    # 2) Gather form keys & raw candidates
     form = await request.form()
-    form_keys = list(form.keys())
     raw_candidates = [
         final_label,
         form.get("json", ""),
@@ -204,22 +217,12 @@ async def chat_endpoint(
     for blob in (other_models, form.get("json", ""), form.get("other_models", "")):
         raw_candidates += labels_from_any_json(blob or "")
 
-    # 3) Detect which label we’ll use
-    chosen_label = "unsure"
-    matched_string = ""
-    for candidate in raw_candidates:
-        lbl = detect_label(candidate)
-        if lbl:
-            chosen_label = lbl
-            matched_string = candidate
-            break
-
-    # --- TEST OVERRIDE: if nothing was provided, default to no_evidence ---
-    if chosen_label == "unsure" and not matched_string and all(not c.strip() for c in raw_candidates):
+    chosen_label = next(
+        (detect_label(c) for c in raw_candidates if detect_label(c)), "unsure"
+    )
+    if chosen_label == "unsure" and all(not c.strip() for c in raw_candidates):
         chosen_label = "no_evidence"
-        matched_string = "<defaulted:no_evidence>"
 
-    # 4) Parse context for prompt display
     try:
         ctx = json.loads(other_models or form.get("json", "") or "{}")
         if not isinstance(ctx, dict):
@@ -227,25 +230,16 @@ async def chat_endpoint(
     except Exception:
         ctx = {}
 
-    # 5) Build prompt & call Groq
     messages = [
-        {"role": "system",  "content": SYS_TEMPLATES[chosen_label]},
-        {"role": "user",    "content": USER_TEMPLATES[chosen_label].format(
-            data=json.dumps(ctx, indent=2))}
+        {"role": "system", "content": SYS_TEMPLATES[chosen_label]},
+        {"role": "user",
+         "content": USER_TEMPLATES[chosen_label].format(
+             data=json.dumps(ctx, indent=2))}
     ]
-    answer = call_groq(messages)
+    answer = call_groq(messages)                 # default model
+    return JSONResponse({"answer": answer})
 
-    # 6) Return with debug info
-    return JSONResponse({
-        "answer":         answer,
-        "detected_label": chosen_label,
-        "matched_string": matched_string,
-        "raw_candidates": raw_candidates,
-        "form_keys":      form_keys,
-        "final_label":    chosen_label,
-        **ctx
-    })
-# ---------- /report & /llmreport remain unchanged ---------------------------
+# ---------- /report ----------------------------------------------------------
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
@@ -254,6 +248,7 @@ async def report_endpoint(
     lbl = detect_label(final_label)
     if lbl == "":
         raise HTTPException(400, "final_label must be pneumonia, no_evidence or unsure.")
+
     hdr_map = {
         "pneumonia":   "This image demonstrates pneumonia.",
         "no_evidence": "No evidence of pneumonia is seen on this image.",
@@ -269,18 +264,41 @@ async def report_endpoint(
         f"Assessment Summary: {hdr_map[lbl]}\n\n"
         f"{detail_map[lbl]}"
     )
-    return JSONResponse({"report": call_groq(prompt), "final_label": lbl})
+    report = call_groq(prompt)                   # default model
+    return JSONResponse({"report": report, "final_label": lbl})
 
+# ---------- /llmreport  (uses gpt-oss-120b) ----------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
-    if not payload.evidence.strip():
+    evidence = payload.evidence.strip()
+    if not evidence:
         raise HTTPException(400, "Field 'evidence' is empty.")
+
     PROMPT = (
-        "You are a senior consultant radiologist.\n"
-        "Using **all** the evidence below, write exactly **5–7 bullet points** "
-        "focused on pneumonia presence/absence & general appearance.\n\n"
-        "Your entire output **must** be bullet points only, each starting with '-'.\n\n"
-        f"Evidence:\n{payload.evidence}\n\n"
+        "You are a senior consultant radiologist.\n\n"
+        "You are given:\n"
+        " • **final_label** – consensus from several AI models "
+        "(pneumonia | no_evidence | unsure)\n"
+        " • **probabilities** for 14 CheXpert findings:\n"
+        "   No Finding, Enlarged Cardiomediastinum, Cardiomegaly, "
+        "   Lung Opacity, Lung Lesion, Edema, Consolidation, Pneumonia, "
+        "   Atelectasis, Pneumothorax, Pleural Effusion, Pleural Other, "
+        "   Fracture, Support Devices\n"
+        " • additional free-text evidence.\n\n"
+        "Using **all** this information, write **exactly 5–7 bullet points** "
+        "in British English:\n"
+        " - First address the presence or absence of **pneumonia**.\n"
+        " - Then mention any other pertinent findings.\n"
+        "Avoid headings, patient identifiers or dates.\n\n"
+        f"Evidence:\n{evidence}\n\n"
         "Begin bullet list:"
     )
-    return JSONResponse({"report": call_groq(PROMPT)})
+    report = call_groq(
+        PROMPT,
+        model="openai/gpt-oss-120b",
+        temperature=1.0,
+        max_completion_tokens=8192,
+        top_p=1,
+        reasoning_effort="medium"
+    )
+    return JSONResponse({"report": report})

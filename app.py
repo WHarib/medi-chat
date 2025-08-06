@@ -370,23 +370,32 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         )
 
     messages = [
-        {
+         {
             "role": "system",
             "content": (
                 "You are a senior consultant radiologist.  The caller provides:\n"
-                "• a **summary** (in triple back-ticks) that is 100 % confirmed for "
-                "pneumonia status.\n"
-                "• an **evidence** block with model outputs.\n\n"
-                "Write **exactly 5–7 bullet points** in British English.\n"
-                "Structure depends on the pneumonia status in the summary:\n"
-                "• **Present**  → bullets on location, extent/severity and **management "
-                "  or follow-up** advice.\n"
-                "• **Absent**   → reassuring bullets on normal findings; no follow-up.\n"
-                "• **Uncertain**→ bullets that state equivocal nature **plus sensible "
-                "  next steps** (repeat imaging, clinical correlation, etc.).\n\n"
+                "• a **summary** (inside triple back-ticks) that is 100 % confirmed for "
+                "pneumonia status – regard this as fact.\n"
+                "• an **evidence** block listing the model’s detected findings and any "
+                "labels whose probability exceeds its threshold.\n\n"
+
+                "Write **exactly 5–7 bullet points** in British English.\n\n"
+
+                "Bullet-point template (choose the branch that matches the summary):\n"
+                "• **Present**   → ① confirm pneumonia and its likely location / extent; "
+                "② mention any *other* abnormalities from the evidence; "
+                "③ add concise management or follow-up advice.\n"
+                "• **Absent**    → ① state that lungs are clear; "
+                "② explicitly note that no other significant abnormalities were detected; "
+                "③ end with a reassuring statement (no further imaging required).\n"
+                "• **Uncertain** → ① state the equivocal nature; "
+                "② describe any subtle or conflicting findings from the evidence; "
+                "③ list sensible next steps (e.g. repeat imaging, clinical correlation, "
+                "laboratory tests).\n\n"
+
                 "STYLE RULES (strict):\n"
-                "– Do **NOT** include any numbers, percentages or raw data.\n"
-                "– Do **NOT** reference AI, probabilities or the words "
+                "– Do **NOT** include numbers, percentages, thresholds or raw data.\n"
+                "– Do **NOT** mention AI, probabilities or the words "
                 "  'summary' / 'evidence'.\n"
                 "– Use concise, professional radiology language.\n"
                 "– No headings, dates or patient identifiers."

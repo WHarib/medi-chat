@@ -26,7 +26,6 @@ GROQ_API_KEY    = os.getenv("GROQ_API_KEY")
 GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama3-70b-8192")
 PNEUMONIA_INDEX = LABELS.index("Pneumonia")
 
-# Ensure torch caches are writable on HF
 os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
 os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 os.makedirs("/tmp/torch_cache", exist_ok=True)
@@ -113,7 +112,6 @@ class LLMReportIn(BaseModel):
 def root():
     return {"ok": True, "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
-
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -121,7 +119,6 @@ async def predict_chexpert(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(400, f"Bad image: {e}")
     return JSONResponse(classify_image(pil))
-
 
 @app.post("/chat")
 async def chat_endpoint(
@@ -133,11 +130,12 @@ async def chat_endpoint(
     except Exception as e:
         raise HTTPException(400, f"Bad image: {e}")
 
-    merged = {}
     try:
         merged = json.loads(other_models or "{}")
-    except:
-        pass
+        if not isinstance(merged, dict):
+            raise ValueError("Expected a JSON object.")
+    except Exception:
+        raise HTTPException(400, "Invalid 'other_models' format. Expected a JSON object (not a list).")
 
     label   = merged.get("final_label", "unsure")
     buckets = merged.get("buckets", {})
@@ -145,13 +143,16 @@ async def chat_endpoint(
 
     if label == "pneumonia":
         header = "This image demonstrates pneumonia."
-        instr  = "Describe the anatomical location and key findings."
+        instr  = "Describe the anatomical location, radiographic features, and potential severity."
     elif label == "no_evidence":
         header = "No evidence of pneumonia is seen on this image."
-        instr  = "Comment on lung fields, mediastinum, and image quality."
+        instr  = (
+            "Reassure the clinical team. Comment on clear lung fields, normal mediastinal contours, "
+            "and absence of radiographic abnormalities."
+        )
     else:
         header = "Findings are uncertain for pneumonia."
-        instr  = "Recommend next steps, e.g. further imaging or clinical correlation."
+        instr  = "Recommend appropriate next steps, such as clinical correlation or repeat imaging."
 
     prompt = (
         "You are a senior consultant radiologist.\n\n"
@@ -164,30 +165,28 @@ async def chat_endpoint(
     answer = call_groq(prompt)
     return JSONResponse({"answer": answer, **merged})
 
-
 @app.post("/report")
 async def report_endpoint(
-    file: UploadFile     = File(...),
-    final_label: str     = Form(...)
+    file: UploadFile = File(...),
+    final_label: str = Form(...)
 ):
-    # Build your one-liner + instructions based on final_label
     if final_label == "pneumonia":
         label_text = "This image demonstrates pneumonia."
         detail     = (
             "Draft 5–7 bullet points focusing on the presence of pneumonia, "
-            "including anatomical location, salient findings, and recommendations."
+            "including anatomical location, salient radiographic findings, and management suggestions."
         )
     elif final_label == "no_evidence":
         label_text = "No evidence of pneumonia is seen on this image."
         detail     = (
-            "Draft 5–7 bullet points describing the chest X-ray, "
-            "noting pulmonary fields, mediastinum, and absence of pneumonia."
+            "Draft 5–7 reassuring bullet points describing the normal chest X-ray, "
+            "highlighting clear lung fields, normal mediastinum, and absence of pathology."
         )
     else:
         label_text = "Findings are uncertain for pneumonia."
         detail     = (
-            "Draft 5–7 bullet points summarising the uncertainty, key observations, "
-            "and recommended next steps."
+            "Draft 5–7 bullet points summarising the ambiguity, notable observations, "
+            "and suggested next steps for clinical evaluation."
         )
 
     prompt = (
@@ -202,7 +201,6 @@ async def report_endpoint(
         "label_text":  label_text
     })
 
-
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
     if not payload.evidence.strip():
@@ -212,13 +210,12 @@ async def llmreport_endpoint(payload: LLMReportIn):
         "Use ALL available evidence (model outputs, summaries, etc.) to write a chest X-ray report focused "
         "on the presence or absence of **pneumonia**. This is your primary diagnostic concern. Also comment briefly "
         "on the general appearance of the X-ray.\n\n"
-        "Evidence:\n{evidence}\n\n"
+        f"Evidence:\n{payload.evidence}\n\n"
         "Write 5–7 bullet points using markdown dashes:\n"
         "- Findings (objective radiological observations)\n"
         "- Impression (pneumonia: yes / no / suspected, including key differentials if applicable)\n"
         "- Recommendations (e.g. follow-up, additional imaging, clinical correlation), if clinically indicated\n"
         "Avoid referencing model names, thresholds, or probabilities unless they are clinically relevant."
     )
-    prompt = LLM_REPORT_PROMPT.replace("{evidence}", payload.evidence)
-    report_text = call_groq(prompt)
+    report_text = call_groq(LLM_REPORT_PROMPT)
     return JSONResponse({"report": report_text})

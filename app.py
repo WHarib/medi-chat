@@ -316,5 +316,72 @@ async def llmreport_endpoint(request: Request):
         reasoning_effort="medium"
     )
     return JSONResponse({"report": report})
+# -----------------------------------------------------------------
+#  NEW ENDPOINT: /vision_report  – GPT-4-o (120 B) image analysis
+# -----------------------------------------------------------------
+import base64
+
+@app.post("/vision_report")
+async def vision_report(
+    file: UploadFile = File(...),
+    extra_prompt: str = Form("", description="Optional extra instructions")
+):
+    """
+    Feed an X-ray (or any image) to *openai/gpt-oss-120b* via Groq.
+
+    The model is asked to:
+      1. Describe the image objectively.
+      2. Comment on any abnormalities (or state that none are seen).
+      3. Provide a concise summary suitable for a clinical note.
+
+    Returns the model's plain-text answer.
+    """
+    # 1) Read and sanity-check image
+    try:
+        img_bytes = await file.read()
+        Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(400, f"Bad image: {exc}")
+
+    # 2) Convert to data-URL
+    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "png"
+    data_url = (
+        f"data:image/{ext};base64," + base64.b64encode(img_bytes).decode()
+    )
+
+    # 3) Build multimodal message payload
+    vision_messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "Please perform **three tasks** on the chest X-ray below:\n"
+                        "1. **Objective description** of visible anatomy and features.\n"
+                        "2. **Comment on abnormalities** (state 'None seen' if normal).\n"
+                        "3. **Concise overall summary** (like senior radiologist).\n\n"
+                        f"{extra_prompt.strip()}"
+                    ).strip()
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url}
+                }
+            ]
+        }
+    ]
+
+    # 4) Call Groq (GPT-4-o 120 B)
+    answer = call_groq(
+        vision_messages,
+        model="openai/gpt-oss-120b",
+        max_completion_tokens=1024,
+        temperature=0.3,
+        top_p=1,
+        reasoning_effort="medium"
+    )
+
+    return JSONResponse({"report": answer})
 
 

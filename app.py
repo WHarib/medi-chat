@@ -3,7 +3,7 @@
 #                    Medi-Chat API (CheXpert + Groq)
 # ================================================================
 
-import os, io, json, re
+import os, io, json, re, base64
 from typing import Dict, Any, List, Optional, Union
 
 import torch, numpy as np
@@ -28,8 +28,7 @@ THRESHOLD_PATH = os.getenv("THRESHOLD_PATH", "thresholds.json")
 DEVICE         = ("cuda" if torch.cuda.is_available()
                   else ("mps" if torch.backends.mps.is_available() else "cpu"))
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY")
-# default model for most endpoints
-GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama3-70b-8192")   # default text model
 PNEUMONIA_IDX  = LABELS.index("Pneumonia")
 
 os.environ.setdefault("TORCH_HOME", "/tmp/torch_cache")
@@ -37,7 +36,7 @@ os.environ.setdefault("XDG_CACHE_HOME", "/tmp/torch_cache")
 os.makedirs("/tmp/torch_cache", exist_ok=True)
 
 # ------------------------------------------------
-# FASTAPI APP
+# FASTAPI
 # ------------------------------------------------
 app = FastAPI(title="Medi-Chat API (CheXpert + Groq)",
               docs_url="/docs", redoc_url="/redoc")
@@ -99,9 +98,7 @@ def call_groq(
     model: str = GROQ_MODEL,
     **kwargs
 ) -> str:
-    """
-    Wrapper around Groq chat-completion with optional model override.
-    """
+    """Wrapper around Groq chat-completion with optional model override."""
     if not GROQ_API_KEY:
         raise HTTPException(500, "GROQ_API_KEY not configured.")
     if isinstance(messages, str):
@@ -115,21 +112,20 @@ def call_groq(
     return resp.choices[0].message.content.strip()
 
 # ------------------------------------------------
-# INPUT MODEL
+# Pydantic model
 # ------------------------------------------------
 class LLMReportIn(BaseModel):
     evidence: str
     summary: Optional[str] = None
 
 # ------------------------------------------------
-# ENDPOINTS
+# ENDPOINTS (predict_chexpert, chat, report unchanged)
 # ------------------------------------------------
 @app.get("/")
 def root():
     return {"ok": True,
             "message": "Use /predict_chexpert, /chat, /report or /llmreport."}
 
-# ---------- /predict_chexpert ------------------------------------------------
 @app.post("/predict_chexpert")
 async def predict_chexpert(file: UploadFile = File(...)):
     try:
@@ -138,9 +134,8 @@ async def predict_chexpert(file: UploadFile = File(...)):
     except Exception as exc:
         raise HTTPException(500, f"Internal error in /predict_chexpert: {exc!r}")
 
-# ---------- /chat  -----------------------------------------------------------
+# ---------- /chat (unchanged from previous working version) -----------------
 LABEL_SET = {"pneumonia", "no_evidence", "unsure"}
-
 SYS_TEMPLATES = {
     "pneumonia":
         "You are a senior consultant radiologist. The image shows pneumonia. "
@@ -155,7 +150,6 @@ SYS_TEMPLATES = {
         "You are a senior consultant radiologist. Findings are equivocal for "
         "pneumonia. Briefly state the uncertainty and outline sensible next steps."
 }
-
 USER_TEMPLATES = {
     "pneumonia":
         "Assessment summary: This image demonstrates pneumonia.\n\n"
@@ -236,10 +230,10 @@ async def chat_endpoint(
          "content": USER_TEMPLATES[chosen_label].format(
              data=json.dumps(ctx, indent=2))}
     ]
-    answer = call_groq(messages)                 # default model
+    answer = call_groq(messages)                 # default text model
     return JSONResponse({"answer": answer})
 
-# ---------- /report ----------------------------------------------------------
+# ---------- /report (unchanged) ---------------------------------------------
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),
@@ -248,7 +242,6 @@ async def report_endpoint(
     lbl = detect_label(final_label)
     if lbl == "":
         raise HTTPException(400, "final_label must be pneumonia, no_evidence or unsure.")
-
     hdr_map = {
         "pneumonia":   "This image demonstrates pneumonia.",
         "no_evidence": "No evidence of pneumonia is seen on this image.",
@@ -264,40 +257,76 @@ async def report_endpoint(
         f"Assessment Summary: {hdr_map[lbl]}\n\n"
         f"{detail_map[lbl]}"
     )
-    report = call_groq(prompt)                   # default model
+    report = call_groq(prompt)   # default text model
     return JSONResponse({"report": report, "final_label": lbl})
 
-# ---------- /llmreport  (uses gpt-oss-120b) ----------------------------------
+# ---------- /llmreport  ------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn):
-    evidence = payload.evidence.strip()
-    if not evidence:
+    """
+    Accepts payload.evidence as JSON or plain text.
+    If JSON, extracts probabilities & final_label; otherwise falls back
+    to free-text behaviour.  Always returns 5–7 bullet points.
+    """
+    raw = payload.evidence.strip()
+    if not raw:
         raise HTTPException(400, "Field 'evidence' is empty.")
 
-    PROMPT = (
-        "You are a senior consultant radiologist.\n\n"
-        "You are given:\n"
-        " • **final_label** – consensus from several AI models "
-        "(pneumonia | no_evidence | unsure)\n"
-        " • **probabilities** for 14 CheXpert findings:\n"
-        "   No Finding, Enlarged Cardiomediastinum, Cardiomegaly, "
-        "   Lung Opacity, Lung Lesion, Edema, Consolidation, Pneumonia, "
-        "   Atelectasis, Pneumothorax, Pleural Effusion, Pleural Other, "
-        "   Fracture, Support Devices\n"
-        " • additional free-text evidence.\n\n"
-        "Using **all** this information, write **exactly 5–7 bullet points** "
+    # try to parse JSON evidence
+    resolved_label: str = ""
+    probs: List[float] = []
+    free_text_parts: List[str] = []
+    try:
+        parsed = json.loads(raw)
+        # evidence might be a dict or list of dicts
+        dicts = parsed if isinstance(parsed, list) else [parsed]
+        for block in dicts:
+            if isinstance(block, dict):
+                if not resolved_label and "final_label" in block:
+                    resolved_label = block["final_label"]
+                if "probabilities" in block and isinstance(block["probabilities"], list):
+                    probs = block["probabilities"]
+                # keep any string comments
+                if "answer" in block and isinstance(block["answer"], str):
+                    free_text_parts.append(block["answer"])
+    except Exception:
+        # not JSON – treat as plain text evidence
+        free_text_parts.append(raw)
+
+    # infer label if still missing
+    if not resolved_label and isinstance(parsed, dict):
+        if parsed.get("pneumonia_present") is True:
+            resolved_label = "pneumonia"
+        elif parsed.get("pneumonia_present") is False:
+            resolved_label = "no_evidence"
+
+    if not resolved_label:
+        resolved_label = "unsure"
+
+    # build structured prompt
+    preamble = (
+        "You are a senior consultant radiologist.\n"
+        "Below you have:\n"
+        f" • **final_label**: {resolved_label}\n"
+        " • **probabilities** for 14 CheXpert labels (same order as the list below).\n"
+        " • Free-text notes from other models / clinicians.\n\n"
+        "Use **all available information** to write exactly **5–7 bullet points** "
         "in British English:\n"
-        " - First address the presence or absence of **pneumonia**.\n"
+        " - Begin with the presence or absence of **pneumonia**.\n"
         " - Then mention any other pertinent findings.\n"
-        "Avoid headings, patient identifiers or dates.\n\n"
-        f"Evidence:\n{evidence}\n\n"
+        "Avoid headings, patient identifiers, or dates.\n\n"
+        "### CheXpert probabilities\n"
+        f"{json.dumps(probs, indent=2) if probs else 'Not provided'}\n\n"
+        "### Extra notes\n"
+        f"{'  • ' + '  • '.join(free_text_parts) if free_text_parts else 'None'}\n\n"
         "Begin bullet list:"
     )
+
     report = call_groq(
-        PROMPT,
+        preamble,
         model="openai/gpt-oss-120b",
-        temperature=1.0,
         max_completion_tokens=8192,
+        temperature=0.7,
         top_p=1,
         reasoning_effort="medium"
     )

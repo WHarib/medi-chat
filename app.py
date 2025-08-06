@@ -352,13 +352,19 @@ async def report_endpoint(
 
 
 # ---------- /llmreport  ------------------------------------------------------
+# ---------- /llmreport  ------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
-    Summary = ground truth (present / absent / uncertain).
-    Evidence = supporting detail.
-    Output: 5–7 concise bullets, qualitative only, with recommendations
-    governed by the pneumonia status.
+    Summary is definitive for pneumonia status.
+    Evidence supplies supporting findings.
+    Output a short radiology-style narrative (≈ 2–4 paragraphs) that:
+      • Opens with the pneumonia conclusion (present / absent / uncertain).
+      • Describes all other abnormalities suggested by the evidence.
+      • Adds a brief 'Clinical Significance' comment (why this matters).
+      • Ends with sensible recommendations (follow-up, treatment, correlation),
+        tailored to the pneumonia status and any complications.
+    No bullet-point limit; no numbers or AI references.
     """
 
     evidence_text = (payload.evidence or "").strip()
@@ -370,35 +376,37 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         )
 
     messages = [
-         {
+        {
             "role": "system",
             "content": (
                 "You are a senior consultant radiologist.  The caller provides:\n"
-                "• a **summary** (inside triple back-ticks) that is 100 % confirmed for "
-                "pneumonia status – regard this as fact.\n"
-                "• an **evidence** block listing the model’s detected findings and any "
-                "labels whose probability exceeds its threshold.\n\n"
-
-                "Write **exactly 5–7 bullet points** in British English.\n\n"
-
-                "Bullet-point template (choose the branch that matches the summary):\n"
-                "• **Present**   → ① confirm pneumonia and its likely location / extent; "
-                "② mention any *other* abnormalities from the evidence; "
-                "③ add concise management or follow-up advice.\n"
-                "• **Absent**    → ① state that lungs are clear; "
-                "② explicitly note that no other significant abnormalities were detected; "
-                "③ end with a reassuring statement (no further imaging required).\n"
-                "• **Uncertain** → ① state the equivocal nature; "
-                "② describe any subtle or conflicting findings from the evidence; "
-                "③ list sensible next steps (e.g. repeat imaging, clinical correlation, "
-                "laboratory tests).\n\n"
-
+                "• a **summary** (triple back-ticks) that is 100 % confirmed for "
+                "pneumonia status – regard it as fact.\n"
+                "• an **evidence** block listing detected findings and labels over "
+                "threshold.\n\n"
+                "Write a concise narrative report in British English (about two to "
+                "four short paragraphs, 150–250 words):\n"
+                "1. **Opening diagnosis** – state whether pneumonia is present, absent "
+                "   or equivocal, exactly as in the summary.\n"
+                "2. **Imaging description** – describe all other findings suggested by "
+                "   the evidence (e.g. pleural effusion, cardiomediastinal widening, "
+                "   pneumothorax).  Use qualitative phrasing only.\n"
+                "3. **Clinical significance** – one or two sentences explaining why the "
+                "   pattern is important (e.g. classic lobar pattern, subtle but "
+                "   clinically significant, textbook example, etc.).\n"
+                "4. **Recommendations** – finish with appropriate management or "
+                "   follow-up advice, tailored to the certainty: \n"
+                "      • Present → treatment and possible follow-up imaging.\n"
+                "      • Absent  → reassurance, no further imaging needed.\n"
+                "      • Uncertain → suggestions such as repeat CXR, CT, labs, "
+                "        clinical correlation.\n\n"
                 "STYLE RULES (strict):\n"
-                "– Do **NOT** include numbers, percentages, thresholds or raw data.\n"
-                "– Do **NOT** mention AI, probabilities or the words "
-                "  'summary' / 'evidence'.\n"
-                "– Use concise, professional radiology language.\n"
-                "– No headings, dates or patient identifiers."
+                "– Do **NOT** include numbers, probabilities or thresholds.\n"
+                "– Do **NOT** mention AI, the words 'summary' or 'evidence'.\n"
+                "– Write in a formal radiology tone, but may use phrases such as "
+                "  'textbook case', 'subtle but clinically significant', etc.\n"
+                "– No headings beyond those implicit paragraphs; no dates or patient "
+                "  identifiers."
             ),
         },
         {
@@ -418,7 +426,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
 
     report = call_groq(
         messages,
-        model="openai/gpt-oss-120b",
+        model="openai/gpt-oss-120b",   # omit max_completion_tokens → full budget
         temperature=0.7,
         top_p=1,
         reasoning_effort="medium",

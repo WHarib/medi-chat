@@ -1,7 +1,6 @@
 # app.py
 # ================================================================
-#                      Medi-Chat API (CheXpert + Groq)
-#     FastAPI service for chest X-ray triage, reporting & advice
+#                    Medi-Chat API (CheXpert + Groq)
 # ================================================================
 
 import os, io, json, re
@@ -10,7 +9,8 @@ from typing import Dict, Any, List, Optional, Union
 import torch, numpy as np
 from PIL import Image
 from torchvision import transforms, models
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from groq import Groq
 from pydantic import BaseModel
@@ -171,36 +171,68 @@ USER_TEMPLATES = {
         "Instruction: Suggest appropriate next steps."
 }
 
-def normalise_label(label: str) -> str:
-    return re.sub(r"\s+", "_", (label or "").strip().lower())
+def detect_label(text: str) -> str:
+    """
+    Fuzzy-match any snippet to one of the three canonical labels.
+    """
+    t = (text or "").lower()
+    if "pneum" in t:
+        return "pneumonia"
+    if "no" in t and ("evid" in t or "pneumonia" in t):
+        return "no_evidence"
+    if any(k in t for k in ("unsure", "uncertain", "equivoc")):
+        return "unsure"
+    return ""
+
 
 @app.post("/chat")
 async def chat_endpoint(
+    request: Request,
     file: UploadFile = File(...),
-    final_label: str = Form(""),
-    other_models: str = Form("")
+    final_label: str = Form("", description="Preferred field for the label"),
+    other_models: str = Form("", description="Optional JSON blob from ensemble")
 ):
+    # ------ check the image -------------------------------------------------
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
+    # ------ collect every form field as raw strings -------------------------
+    form = await request.form()
+    raw_candidates: List[str] = [
+        final_label,
+        form.get("json", ""),          # n8n pattern
+        other_models,
+        form.get("other_models", "")   # alias guard
+    ]
+
+    # also look inside JSON blobs for "final_label"
+    for blob in (other_models, form.get("json", ""), form.get("other_models", "")):
+        try:
+            data = json.loads(blob) if blob else {}
+            if isinstance(data, dict):
+                raw_candidates.append(str(data.get("final_label", "")))
+        except Exception:
+            pass
+
+    # ------ pick the first match -------------------------------------------
+    label = next((detect_label(c) for c in raw_candidates if detect_label(c)), "unsure")
+
+    # ------ re-parse other_models for prompt display ------------------------
     try:
-        other = json.loads(other_models or "{}")
+        other = json.loads(other_models or form.get("json", "") or "{}")
         if not isinstance(other, dict):
-            raise ValueError
+            other = {}
     except Exception:
-        raise HTTPException(400, "Invalid 'other_models' – must be a JSON object.")
+        other = {}
 
-    label = normalise_label(final_label or other.get("final_label") or "unsure")
-    if label not in LABEL_SET:
-        label = "unsure"
-
+    # ------ build prompt and call Groq --------------------------------------
     messages = [
         {"role": "system", "content": SYS_TEMPLATES[label]},
         {"role": "user",
          "content": USER_TEMPLATES[label].format(
-             data=json.dumps(other, indent=2))},
+             data=json.dumps(other, indent=2))}
     ]
     answer = call_groq(messages)
     return JSONResponse({"answer": answer, "final_label": label, **other})
@@ -211,9 +243,9 @@ async def report_endpoint(
     file: UploadFile = File(...),
     final_label: str = Form(...)
 ):
-    label = normalise_label(final_label)
-    if label not in LABEL_SET:
-        raise HTTPException(400, "final_label must be pneumonia, no_evidence, or unsure.")
+    lbl = detect_label(final_label)
+    if lbl == "":
+        raise HTTPException(400, "final_label must be pneumonia, no_evidence or unsure.")
 
     hdr_map = {
         "pneumonia":   "This image demonstrates pneumonia.",
@@ -235,13 +267,12 @@ async def report_endpoint(
             "and suggested next steps (e.g. follow-up imaging, clinical correlation)."
         )
     }
-
     prompt = (
         "You are a senior consultant radiologist.\n\n"
-        f"Assessment Summary: {hdr_map[label]}\n\n"
-        f"{detail_map[label]}"
+        f"Assessment Summary: {hdr_map[lbl]}\n\n"
+        f"{detail_map[lbl]}"
     )
-    return JSONResponse({"report": call_groq(prompt), "final_label": label})
+    return JSONResponse({"report": call_groq(prompt), "final_label": lbl})
 
 # ---------- /llmreport -------------------------------------------------------
 @app.post("/llmreport")

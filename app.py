@@ -260,63 +260,53 @@ async def report_endpoint(
     report = call_groq(prompt)   # default text model
     return JSONResponse({"report": report, "final_label": lbl})
 
-# ---------- /llmreport  (syntax-fix) ----------------------------------------
+# ---------- /llmreport  (pass-through version) ------------------------------
 @app.post("/llmreport")
-async def llmreport_endpoint(payload: LLMReportIn):
-    raw = payload.evidence.strip()
-    if not raw:
-        raise HTTPException(400, "Field 'evidence' is empty.")
+async def llmreport_endpoint(request: Request):
+    """
+    Accepts either JSON or form-data.
+    • `evidence`  (or `evidences`) – raw probabilities / model output
+    • `summary`   – confirmed narrative from previous step
 
-    resolved_label: str = ""
-    probs: List[float] = []
-    free_text_parts: List[str] = []
+    Both fields are forwarded **as-is** to GPT-OSS-120B.
+    The model is instructed that the summary is definitive regarding pneumonia.
+    """
+    # ---------------- read body flexibly -----------------------------------
+    if request.headers.get("content-type", "").startswith("application/json"):
+        body = await request.json()
+        evidence_text = body.get("evidence") or body.get("evidences", "")
+        summary_text  = body.get("summary", "")
+    else:
+        form = await request.form()
+        evidence_text = form.get("evidence") or form.get("evidences", "")
+        summary_text  = form.get("summary", "")
 
-    parsed: Union[dict, list] = {}
-    try:
-        parsed = json.loads(raw)
-        dicts = parsed if isinstance(parsed, list) else [parsed]
-        for block in dicts:
-            if isinstance(block, dict):
-                if not resolved_label and "final_label" in block:
-                    resolved_label = str(block["final_label"])
-                if "probabilities" in block and isinstance(block["probabilities"], list):
-                    probs = block["probabilities"]
-                for k in ("answer", "evidence", "summary"):
-                    if k in block and isinstance(block[k], str):
-                        free_text_parts.append(block[k])
-                if block.get("pneumonia_present") is True and not resolved_label:
-                    resolved_label = "pneumonia"
-                if block.get("pneumonia_present") is False and not resolved_label:
-                    resolved_label = "no_evidence"
-    except Exception:
-        free_text_parts.append(raw)
+    evidence_text = str(evidence_text).strip()
+    summary_text  = str(summary_text).strip()
 
-    if not resolved_label:
-        txt = " ".join(free_text_parts).lower()
-        if "pneumonia present: true" in txt:
-            resolved_label = "pneumonia"
-        elif "pneumonia present: false" in txt or "no evidence of pneumonia" in txt:
-            resolved_label = "no_evidence"
-        else:
-            resolved_label = "unsure"
+    if not evidence_text and not summary_text:
+        raise HTTPException(
+            400,
+            "Provide at least one of these fields: evidence / summary."
+        )
 
-    # ---------- build prompt strings *first* -------------------------------
-    probs_block  = json.dumps(probs, indent=2) if probs else "Not provided"
-    notes_block  = "\n".join(f"- {s}" for s in free_text_parts) if free_text_parts else "None"
-
+    # ---------------- build prompt ----------------------------------------
     prompt = (
         "You are a senior consultant radiologist.\n\n"
-        f"**final_label:** {resolved_label}\n\n"
-        "### CheXpert probabilities\n"
-        f"{probs_block}\n\n"
-        "### Free-text evidence & summaries\n"
-        f"{notes_block}\n\n"
-        "Using ALL the information above, write exactly **5–7 bullet points** "
-        "in British English (begin with pneumonia presence/absence). "
-        "Avoid headings, dates, or patient identifiers.\n\n"
+        "**Clinical summary (confirmed, 100 % reliable):**\n"
+        f"{summary_text or '*No summary provided.*'}\n\n"
+        "**Additional model evidence (probabilities, free text, etc.):**\n"
+        f"{evidence_text or '*No evidence provided.*'}\n\n"
+        "Using ALL of the above, write **exactly 5–7 bullet points** "
+        "in British English:\n"
+        " - Begin with the confirmed pneumonia conclusion from the summary.\n"
+        " - Then comment on any other findings suggested by the probabilities.\n"
+        "Do NOT contradict the summary regarding pneumonia, and do NOT add "
+        "headings, dates or patient identifiers.\n\n"
         "Begin bullet list:"
     )
 
+    # ---------------- call Groq -------------------------------------------
     report = call_groq(
         prompt,
         model="openai/gpt-oss-120b",

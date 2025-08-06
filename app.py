@@ -351,13 +351,14 @@ async def report_endpoint(
     return JSONResponse({"report": report, "final_label": lbl})
 
 
+# ---------- /llmreport  ------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
-    Use the caller-supplied `summary` as the **definitive** pneumonia conclusion
-    (present / absent / uncertain).  The `evidence` is used only to expand upon
-    other thoracic findings.  Output exactly 5–7 qualitative bullet points,
-    without any numbers or AI references.
+    Summary = ground truth (present / absent / uncertain).
+    Evidence = supporting detail.
+    Output: 5–7 concise bullets, qualitative only, with recommendations
+    governed by the pneumonia status.
     """
 
     evidence_text = (payload.evidence or "").strip()
@@ -373,22 +374,22 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
             "role": "system",
             "content": (
                 "You are a senior consultant radiologist.  The caller provides:\n"
-                "  • a **summary** (inside triple back-ticks) that is 100 % confirmed\n"
-                "    regarding pneumonia status – accept it as fact.\n"
-                "  • an **evidence** block (also in back-ticks) that lists supporting\n"
-                "    model outputs and probabilities.\n\n"
-                "Write **exactly 5–7 bullet points** in British English:\n"
-                " 1. Begin with the pneumonia conclusion stated in the summary\n"
-                "    (present / absent / uncertain) – do NOT contradict it.\n"
-                " 2. Then describe qualitatively any other relevant thoracic findings\n"
-                "    suggested by the evidence.\n\n"
-                "STYLE RULES – strictly follow:\n"
-                " • Do **NOT** include any numbers, percentages, thresholds or raw data.\n"
-                " • Do **NOT** mention the AI model, probabilities or the words\n"
-                "   'summary' / 'evidence'.\n"
-                " • Use clear, concise, professional radiology language.\n"
-                " • Do **NOT** add headings, dates, patient identifiers or recommendations\n"
-                "   unless genuine uncertainty exists."
+                "• a **summary** (in triple back-ticks) that is 100 % confirmed for "
+                "pneumonia status.\n"
+                "• an **evidence** block with model outputs.\n\n"
+                "Write **exactly 5–7 bullet points** in British English.\n"
+                "Structure depends on the pneumonia status in the summary:\n"
+                "• **Present**  → bullets on location, extent/severity and **management "
+                "  or follow-up** advice.\n"
+                "• **Absent**   → reassuring bullets on normal findings; no follow-up.\n"
+                "• **Uncertain**→ bullets that state equivocal nature **plus sensible "
+                "  next steps** (repeat imaging, clinical correlation, etc.).\n\n"
+                "STYLE RULES (strict):\n"
+                "– Do **NOT** include any numbers, percentages or raw data.\n"
+                "– Do **NOT** reference AI, probabilities or the words "
+                "  'summary' / 'evidence'.\n"
+                "– Use concise, professional radiology language.\n"
+                "– No headings, dates or patient identifiers."
             ),
         },
         {

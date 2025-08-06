@@ -4,7 +4,7 @@
 # ================================================================
 
 import os, io, json, re
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Tuple
 
 import torch, numpy as np
 from PIL import Image
@@ -180,7 +180,6 @@ def detect_label(text: str) -> str:
         return "unsure"
     return ""
 
-
 def labels_from_any_json(blob: str) -> List[str]:
     """Return every final_label found inside a dict **or** list."""
     try:
@@ -205,13 +204,13 @@ async def chat_endpoint(
     final_label: str = Form(""),
     other_models: str = Form("")
 ):
-    # --- validate image -----------------------------------------------------
+    # validate image
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}")
 
-    # --- harvest raw strings -------------------------------------------------
+    # collect every candidate string
     form = await request.form()
     raw_candidates: List[str] = [
         final_label,
@@ -219,16 +218,19 @@ async def chat_endpoint(
         other_models,
         form.get("other_models", "")
     ]
-
-    # --- extract nested labels from any JSON blobs --------------------------
     for blob in (other_models, form.get("json", ""), form.get("other_models", "")):
-        for lbl in labels_from_any_json(blob or ""):
-            raw_candidates.append(lbl)
+        raw_candidates.extend(labels_from_any_json(blob or ""))
 
-    # --- choose the first recognised label ----------------------------------
-    label = next((detect_label(c) for c in raw_candidates if detect_label(c)), "unsure")
+    # choose label and remember matched string
+    chosen_label: str = "unsure"
+    matched_string: str = ""
+    for c in raw_candidates:
+        lbl = detect_label(c)
+        if lbl:
+            chosen_label, matched_string = lbl, c
+            break
 
-    # --- build prompt --------------------------------------------------------
+    # parse context for prompt display
     try:
         ctx = json.loads(other_models or form.get("json", "") or "{}")
         if not isinstance(ctx, dict):
@@ -236,15 +238,24 @@ async def chat_endpoint(
     except Exception:
         ctx = {}
 
+    # build prompt & call Groq
     messages = [
-        {"role": "system", "content": SYS_TEMPLATES[label]},
+        {"role": "system", "content": SYS_TEMPLATES[chosen_label]},
         {"role": "user",
-         "content": USER_TEMPLATES[label].format(data=json.dumps(ctx, indent=2))}
+         "content": USER_TEMPLATES[chosen_label].format(data=json.dumps(ctx, indent=2))}
     ]
     answer = call_groq(messages)
-    return JSONResponse({"answer": answer, "final_label": label, **ctx})
 
-# ---------- /report & /llmreport (unchanged) ---------------------------------
+    # DEBUG payload ----------------------------------------------------------
+    debug_info = {
+        "detected_label": chosen_label,
+        "matched_string": matched_string,
+        "raw_candidates": raw_candidates
+    }
+
+    return JSONResponse({"answer": answer, **debug_info, "final_label": chosen_label, **ctx})
+
+# ---------- /report & /llmreport remain unchanged ---------------------------
 @app.post("/report")
 async def report_endpoint(
     file: UploadFile = File(...),

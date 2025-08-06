@@ -189,21 +189,19 @@ async def chat_endpoint(
     # 1) Validate image
     try:
         Image.open(io.BytesIO(await file.read())).convert("RGB")
-    except Exception as e:
-        raise HTTPException(400, f"Bad image: {e}")
+    except Exception as exc:
+        raise HTTPException(400, f"Bad image: {exc}")
 
-    # 2) Gather form keys & raw candidate strings
+    # 2) Gather form keys & raw candidates
     form = await request.form()
     form_keys = list(form.keys())
-
     raw_candidates = [
         final_label,
         form.get("json", ""),
         other_models,
         form.get("other_models", "")
     ]
-    # extract from JSON blobs in any of those fields
-    for blob in [other_models, form.get("json", ""), form.get("other_models", "")]:
+    for blob in (other_models, form.get("json", ""), form.get("other_models", "")):
         raw_candidates += labels_from_any_json(blob or "")
 
     # 3) Detect which label we’ll use
@@ -216,15 +214,20 @@ async def chat_endpoint(
             matched_string = candidate
             break
 
-    # 4) Build context dict for prompt
+    # --- TEST OVERRIDE: if nothing was provided, default to no_evidence ---
+    if chosen_label == "unsure" and not matched_string and all(not c.strip() for c in raw_candidates):
+        chosen_label = "no_evidence"
+        matched_string = "<defaulted:no_evidence>"
+
+    # 4) Parse context for prompt display
     try:
         ctx = json.loads(other_models or form.get("json", "") or "{}")
         if not isinstance(ctx, dict):
             ctx = {}
-    except:
+    except Exception:
         ctx = {}
 
-    # 5) Call the LLM
+    # 5) Build prompt & call Groq
     messages = [
         {"role": "system",  "content": SYS_TEMPLATES[chosen_label]},
         {"role": "user",    "content": USER_TEMPLATES[chosen_label].format(
@@ -232,7 +235,7 @@ async def chat_endpoint(
     ]
     answer = call_groq(messages)
 
-    # 6) Return debug info + answer
+    # 6) Return with debug info
     return JSONResponse({
         "answer":         answer,
         "detected_label": chosen_label,
@@ -242,7 +245,6 @@ async def chat_endpoint(
         "final_label":    chosen_label,
         **ctx
     })
-
 # ---------- /report & /llmreport remain unchanged ---------------------------
 @app.post("/report")
 async def report_endpoint(

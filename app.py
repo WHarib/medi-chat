@@ -479,13 +479,13 @@ Return a strict JSON object with exactly these keys:
 {extra_instructions.strip()}
 """.strip()
 
-messages = [{
-  "role": "user",
-  "content": [
-    {"type": "input_text",  "text": json_request_instructions},
-    {"type": "input_image", "image_url": data_url},
-  ],
-}]
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": json_request_instructions},
+            {"type": "input_image", "image_url": data_url},
+        ],
+    }]
 
     raw = call_groq(
         messages,

@@ -90,7 +90,8 @@ DEVICE: str = (
 )
 
 GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+
 MAX_COMPLETION_TOKENS: int = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "8192"))
 
 # Vision model for /analyse (Maverick)
@@ -478,15 +479,13 @@ Return a strict JSON object with exactly these keys:
 {extra_instructions.strip()}
 """.strip()
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": json_request_instructions},
-                {"type": "image_url", "image_url": {"url": data_url}},
-            ],
-        }
-    ]
+messages = [{
+  "role": "user",
+  "content": [
+    {"type": "input_text",  "text": json_request_instructions},
+    {"type": "input_image", "image_url": data_url},
+  ],
+}]
 
     raw = call_groq(
         messages,

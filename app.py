@@ -982,15 +982,20 @@ async def vision_report(
     extra_prompt: str = Form("", description="Optional extra instructions"),
 ) -> JSONResponse:
     """
-    Feed an image to openai/gpt-oss-120b via Groq. Objective description,
-    abnormalities (state 'None seen' if normal), and a concise summary.
+    Feed an image to openai/gpt-oss-120b via Groq.
+    The model is asked to:
+      1. Describe the image objectively.
+      2. Comment on any abnormalities (state ‘None seen’ if normal).
+      3. Provide a concise summary suitable for a clinical note.
     """
     try:
         img_bytes: bytes = await file.read()
+        # Sanity-check the image
         Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}") from exc
 
+    # Make a data URL under Groq's base64/megapixel limits
     data_url = make_data_url_under_limit(img_bytes, file.filename or "upload.png")
 
     vision_messages = [
@@ -1021,6 +1026,7 @@ async def vision_report(
     )
 
     return JSONResponse({"report": answer})
+
 
 
 # ---------- /analyse  (Maverick, descriptive only, no diagnosis) -------------

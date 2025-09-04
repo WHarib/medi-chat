@@ -1,30 +1,6 @@
 
-# ================================================================
-#                    Medi-Chat API (CheXpert + Groq)
-# ================================================================
-
-from __future__ import annotations
-
-import base64
-import io
-import json
-import os
-from typing import Any, Dict, List, Optional, Sequence, Union
-
-import numpy as np
-import torch
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
-from groq import Groq
-from PIL import Image
-from pydantic import BaseModel
-from torchvision import models, transforms
-
-# ------------------------------------------------
-# SIZE / ENCODING LIMITS (Groq)
-# ------------------------------------------------
 MAX_B64_BYTES = 3_600_000   # safety margin under Groq's 4 MB base64 cap
-MAX_PIXELS    = 33_177_600  # 33 megapixels
+MAX_PIXELS = 33_177_600     # 33 megapixels
 
 def make_data_url_under_limit(img_bytes: bytes, filename: str | None = None) -> str:
     """
@@ -36,8 +12,10 @@ def make_data_url_under_limit(img_bytes: bytes, filename: str | None = None) -> 
     # Enforce resolution cap
     if (img.width * img.height) > MAX_PIXELS:
         scale = (MAX_PIXELS / (img.width * img.height)) ** 0.5
-        img = img.resize((max(1, int(img.width * scale)),
-                          max(1, int(img.height * scale))))
+        img = img.resize((
+            max(1, int(img.width * scale)),
+            max(1, int(img.height * scale)),
+        ))
 
     # Try qualities at current size
     for quality in (90, 80, 70, 60, 50, 40):
@@ -48,8 +26,10 @@ def make_data_url_under_limit(img_bytes: bytes, filename: str | None = None) -> 
             return "data:image/jpeg;base64," + b64.decode()
 
     # If still too big, downscale once and retry
-    img = img.resize((max(1, int(img.width * 0.8)),
-                      max(1, int(img.height * 0.8))))
+    img = img.resize((
+        max(1, int(img.width * 0.8)),
+        max(1, int(img.height * 0.8)),
+    ))
     for quality in (70, 60, 50, 40, 35):
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=quality, optimize=True)
@@ -57,8 +37,9 @@ def make_data_url_under_limit(img_bytes: bytes, filename: str | None = None) -> 
         if len(b64) <= MAX_B64_BYTES:
             return "data:image/jpeg;base64," + b64.decode()
 
-    # Last resort
+    # Last resort (may exceed limit, but we tried)
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
 
 
 # ------------------------------------------------
@@ -174,6 +155,7 @@ def classify_image(img: Image.Image) -> Dict[str, Any]:
     }
 
 
+
 def call_groq(
     messages: Union[str, Sequence[Dict[str, Any]]],
     *,
@@ -181,24 +163,28 @@ def call_groq(
     max_completion_tokens: Optional[int] = None,
     **kwargs: Any,
 ) -> str:
-    """Universal wrapper round Groq chat-completion."""
+    """Universal wrapper round Groq chat-completion with robust errors."""
     if not GROQ_API_KEY:
-        raise HTTPException(500, "GROQ_API_KEY not configured.")
+        raise HTTPException(400, "GROQ_API_KEY is not configured on the server.")
 
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
 
-    client = Groq(api_key=GROQ_API_KEY)
-
-    resp = client.chat.completions.create(
-        model=model,
-        messages=list(messages),
-        max_completion_tokens=max_completion_tokens or MAX_COMPLETION_TOKENS,
-        **kwargs,
-    )
-
-    return resp.choices[0].message.content.strip()
-
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=list(messages),
+            max_completion_tokens=max_completion_tokens or MAX_COMPLETION_TOKENS,
+            **kwargs,
+        )
+        content = resp.choices[0].message.content or ""
+        return content.strip()
+    except Exception as exc:
+        # Surface an actionable message to clients (auth, quota, bad args, etc.)
+        status = getattr(exc, "status_code", 502)
+        detail = getattr(exc, "message", str(exc))
+        raise HTTPException(status, f"Groq request failed: {detail}") from exc
 
 # ------------------------------------------------
 # Pydantic model
@@ -436,7 +422,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     return JSONResponse({"report": report})
 
 
-# ---------- /analyse  (Maverick, descriptive only, no diagnosis) -------------
+# ---------- /analyse (Maverick, descriptive only, no diagnosis) --------------
 @app.post("/analyse")
 async def analyse(
     file: UploadFile = File(...),
@@ -453,8 +439,10 @@ async def analyse(
     try:
         img_bytes: bytes = await file.read()
         Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    except Exception as exc:
+    except UnidentifiedImageError as exc:
         raise HTTPException(400, f"Bad image: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(400, f"Unable to read image: {exc!r}") from exc
 
     data_url = make_data_url_under_limit(img_bytes, file.filename or "upload.png")
 
@@ -464,9 +452,7 @@ in British English of the chest X-ray shown. Do not provide a diagnosis,
 probability, recommendation, or clinical certainty language. Focus strictly on
 what is visible. When relevant, name precise lung locations (e.g., right upper
 zone, left lower zone, perihilar region, costophrenic angle).
-
 Return a strict JSON object with exactly these keys:
-
 {{
   "image_orientation_marker": "One of: 'R', 'L', 'Both', 'None visible', or 'Unclear'.",
   "view_and_positioning": "Short text (e.g., PA/AP/Supine/Erect if inferable; otherwise 'Unclear').",
@@ -479,15 +465,16 @@ Return a strict JSON object with exactly these keys:
 {extra_instructions.strip()}
 """.strip()
 
- messages = [
-    {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": json_request_instructions},
-            {"type": "image_url", "image_url": {"url": data_url}},
-        ],
-    }
-]
+    # IMPORTANT: Groq expects 'text' and 'image_url' with nested {'url': ...}
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": json_request_instructions},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }
+    ]
 
     raw = call_groq(
         messages,
@@ -498,16 +485,20 @@ Return a strict JSON object with exactly these keys:
         max_completion_tokens=1024,
     )
 
+    # Try to parse JSON strictly; if it fails, return raw text so the client can see why
+    parsed: Optional[Dict[str, Any]] = None
     try:
-        parsed = json.loads(raw)
+        maybe = json.loads(raw)
+        if isinstance(maybe, dict):
+            parsed = maybe
     except Exception:
         parsed = None
 
     return JSONResponse(
         {
             "model": GROQ_VISION_MODEL_MAVERICK,
-            "analysis": parsed if isinstance(parsed, dict) else None,
-            "raw": raw if not isinstance(parsed, dict) else None,
+            "analysis": parsed,
+            "raw": None if parsed is not None else raw,
             "note": "Descriptive only. No diagnostic interpretation provided.",
         }
     )

@@ -16,9 +16,51 @@ import torch
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from groq import Groq
+
 from PIL import Image
 from pydantic import BaseModel
 from torchvision import models, transforms
+
+# ------------------------------------------------
+# SIZE / ENCODING LIMITS (Groq)
+# ------------------------------------------------
+MAX_B64_BYTES = 3_600_000   # safety margin under Groq's 4 MB base64 limit
+MAX_PIXELS    = 33_177_600  # 33 megapixels
+
+def make_data_url_under_limit(img_bytes: bytes, filename: str | None = None) -> str:
+    """
+    Convert arbitrary input image bytes into a JPEG data URL whose base64 payload
+    is guaranteed (best-effort) to be <= MAX_B64_BYTES and <= MAX_PIXELS.
+    """
+    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+    # Enforce resolution cap
+    if (img.width * img.height) > MAX_PIXELS:
+        scale = (MAX_PIXELS / (img.width * img.height)) ** 0.5
+        img = img.resize((max(1, int(img.width * scale)),
+                          max(1, int(img.height * scale))))
+
+    # Try qualities first at current size
+    for quality in (90, 80, 70, 60, 50, 40):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue())
+        if len(b64) <= MAX_B64_BYTES:
+            return "data:image/jpeg;base64," + b64.decode()
+
+    # If still too big, downscale once and retry
+    img = img.resize((max(1, int(img.width * 0.8)),
+                      max(1, int(img.height * 0.8))))
+    for quality in (70, 60, 50, 40, 35):
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality, optimize=True)
+        b64 = base64.b64encode(buf.getvalue())
+        if len(b64) <= MAX_B64_BYTES:
+            return "data:image/jpeg;base64," + b64.decode()
+
+    # Last resort
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+
 
 # ------------------------------------------------
 # CONFIG
@@ -453,10 +495,7 @@ async def vision_report(
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}") from exc
 
-    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "png"
-    data_url = (
-        f"data:image/{ext};base64," + base64.b64encode(img_bytes).decode()
-    )
+data_url = make_data_url_under_limit(img_bytes, file.filename or "upload.png")
 
     vision_messages = [
         {
@@ -943,23 +982,16 @@ async def vision_report(
     extra_prompt: str = Form("", description="Optional extra instructions"),
 ) -> JSONResponse:
     """
-    Feed an image to *openai/gpt-oss-120b* via Groq.
-    The model is asked to:
-      1. Describe the image objectively.
-      2. Comment on any abnormalities (state ‘None seen’ if normal).
-      3. Provide a concise summary suitable for a clinical note.
+    Feed an image to openai/gpt-oss-120b via Groq. Objective description,
+    abnormalities (state 'None seen' if normal), and a concise summary.
     """
-
     try:
         img_bytes: bytes = await file.read()
         Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}") from exc
 
-    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "png"
-    data_url = (
-        f"data:image/{ext};base64," + base64.b64encode(img_bytes).decode()
-    )
+    data_url = make_data_url_under_limit(img_bytes, file.filename or "upload.png")
 
     vision_messages = [
         {
@@ -968,10 +1000,10 @@ async def vision_report(
                 {
                     "type": "text",
                     "text": (
-                        "Please perform **three tasks** on the chest X-ray below:\n"
-                        "1. **Objective description** of visible anatomy and features.\n"
-                        "2. **Comment on abnormalities** (state 'None seen' if normal).\n"
-                        "3. **Concise overall summary** (like senior radiologist).\n\n"
+                        "Please perform three tasks on the chest X-ray below:\n"
+                        "1) Objective description of visible anatomy and features.\n"
+                        "2) Comment on abnormalities (state 'None seen' if normal).\n"
+                        "3) Concise overall summary (as a senior radiologist).\n\n"
                         f"{extra_prompt.strip()}"
                     ).strip(),
                 },
@@ -1002,57 +1034,38 @@ async def analyse(
 ) -> JSONResponse:
     """
     Non-diagnostic descriptive analysis of a chest X-ray using Groq Maverick.
-
-    • Accepts an uploaded X-ray image (e.g., from n8n binary → multipart/form-data).
-    • Sends the image to `meta-llama/llama-4-maverick-17b-128e-instruct` via Groq.
-    • Returns structured JSON (British English) with purely descriptive content:
-        - orientation markers (e.g., 'R'/'L' if visible)
-        - view/positioning cues
-        - exposure/contrast observations
-        - devices/artefacts/implants/foreign bodies
-        - visually apparent discontinuities or irregular features (non-diagnostic)
-        - overall plain-English description
-      No diagnosis, probabilities, or clinical recommendations.
+    Returns structured JSON. Mentions orientation markers and precise lung
+    locations where applicable. No diagnosis or clinical advice.
     """
-
-    # Validate image early
+    # Validate image
     try:
         img_bytes: bytes = await file.read()
         Image.open(io.BytesIO(img_bytes)).convert("RGB")
     except Exception as exc:
         raise HTTPException(400, f"Bad image: {exc}") from exc
 
-    # Build data URL for Groq vision input
-    ext = file.filename.split(".")[-1].lower() if "." in file.filename else "png"
-    data_url = f"data:image/{ext};base64,{base64.b64encode(img_bytes).decode()}"
+    # Build data URL under Groq's base64 limit
+    data_url = make_data_url_under_limit(img_bytes, file.filename or "upload.png")
 
-    # Instruction for JSON-mode, descriptive only (no diagnosis)
-    # We explicitly ask for a strict JSON object to ease n8n parsing.
+    # Clear, valid-JSON spec; location requirements expressed in prose
     json_request_instructions = f"""
 You are an expert radiography describer. Produce a purely descriptive account
-in **British English** of the chest X-ray shown. Do **not** provide a diagnosis,
-probability, or recommendation. Avoid medical certainty language. Focus on what
-is visually present.
+in British English of the chest X-ray shown. Do not provide a diagnosis,
+probability, recommendation, or clinical certainty language. Focus strictly on
+what is visible. When relevant, name precise lung locations (e.g., right upper
+zone, left lower zone, perihilar region, costophrenic angle).
 
 Return a strict JSON object with exactly these keys:
 
 {{
-  "image_orientation_marker": "One of: 'R', 'L', 'Both', 'None visible', or 'Unclear'",
-  "view_and_positioning": "Short text (e.g., PA/AP/Supine if inferable; otherwise 'Unclear').",
-  "exposure_contrast": "Short text on exposure/contrast (e.g., under/over-exposed, adequate). with stating the exact location in lung",
-  "anatomical_description": "Short paragraph describing visible anatomy and lung fields. with stating the exact location in lung",
-  "devices_and_artefacts": ["List devices/artefacts/implants/foreign bodies if seen; else empty array"] with stating the exact location in lung,
-  "suspected_structural_changes": "Short text noting any visual discontinuities/irregularities/fracture-like lines or asymmetries WITHOUT naming a diagnosis. with stating the exact location in lung",
-  "overall_description": "2–3 sentences giving a plain-English, non-diagnostic overview of what the image depicts. with stating the exact location in lung"
+  "image_orientation_marker": "One of: 'R', 'L', 'Both', 'None visible', or 'Unclear'.",
+  "view_and_positioning": "Short text (e.g., PA/AP/Supine/Erect if inferable; otherwise 'Unclear').",
+  "exposure_contrast": "Short text on exposure/contrast (e.g., under-/over-exposed, adequate), citing where applicable.",
+  "anatomical_description": "Short paragraph describing visible anatomy and lung fields, mentioning specific lung locations when appropriate.",
+  "devices_and_artefacts": ["List devices/artefacts/implants/foreign bodies if seen; otherwise empty array."],
+  "suspected_structural_changes": "Short text noting any visual discontinuities/irregularities/fracture-like lines or asymmetries WITHOUT naming a diagnosis; include locations if relevant.",
+  "overall_description": "2–3 sentences giving a plain-English, non-diagnostic overview of what the image depicts."
 }}
-
-Additional guidance:
-- If the image has an 'R' marker (right), capture it in image_orientation_marker.
-- Mention obvious contrast/exposure features with stating the exact location in lung.
-- Mention items that look artificial (e.g., lines, tubes, clips, pacer leads, jewellery) with stating the exact location in lung.
-- If nothing notable is seen in a category, say so plainly (e.g., 'None visible' or empty list).
-- Keep everything observational and non-judgemental.
-
 {extra_instructions.strip()}
 """.strip()
 
@@ -1066,7 +1079,6 @@ Additional guidance:
         }
     ]
 
-    # Call Groq Maverick in JSON mode for clean machine-readable output
     raw = call_groq(
         messages,
         model=GROQ_VISION_MODEL_MAVERICK,
@@ -1076,7 +1088,6 @@ Additional guidance:
         max_completion_tokens=1024,
     )
 
-    # Try to parse JSON; if parsing fails, still return the raw string for debugging
     try:
         parsed = json.loads(raw)
     except Exception:
@@ -1090,4 +1101,3 @@ Additional guidance:
             "note": "Descriptive only. No diagnostic interpretation provided.",
         }
     )
-

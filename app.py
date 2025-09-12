@@ -389,51 +389,57 @@ async def report_endpoint(
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
-    Convert a majority-anchored summary + four-section evidence block into
-    a concise, consultant-style radiology report (British English).
+    Build a consultant-style CXR report from:
+      - summary: 'pneumonia' | 'no_evidence' | 'unsure' (ground truth for pneumonia)
+      - evidence: a text block containing four sections (any case):
+          * THIS IS THE RESULT OF MAJORITY VOTING
+          * THIS IS THE RESULT OF CHEXPERT
+          * THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC
+          * THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC
     """
     evidence_text = (payload.evidence or "").strip()
     summary_text  = (payload.summary  or "").strip()
 
     if not evidence_text and not summary_text:
-        raise HTTPException(
-            400, "At least one of 'evidence' or 'summary' must be provided."
-        )
+        raise HTTPException(400, "At least one of 'evidence' or 'summary' must be provided.")
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a consultant radiologist. Produce a single, polished report in British English "
-                "(≈140–220 words) with the following sections, in order:\n"
-                "Impression, Findings, Technique, Recommendations.\n\n"
-                "Inputs you receive:\n"
-                "• A one-sentence MAJORITY DECISION summary — this is the definitive pneumonia status and must not be contradicted.\n"
-                "• An evidence block with four headings:\n"
-                "  - THIS IS THE RESULT OF MAJORITY VOTING (ground truth)\n"
-                "  - THIS IS THE RESULT OF CHEXPERT\n"
-                "  - THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC\n"
-                "  - THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC\n\n"
-                "Authoring rules:\n"
-                "• Start 'Impression' with a clear diagnostic statement aligned with the majority decision. "
-                "If equivocal, state the uncertainty plainly and prioritise next steps.\n"
-                "• 'Findings' should integrate salient thoracic features (locations, side/zone, devices/artefacts) from the evidence; "
-                "paraphrase JSON content into clinical prose.\n"
-                "• 'Technique' should briefly state projection/positioning and exposure if available.\n"
-                "• 'Recommendations' should be proportionate and pragmatic (e.g., clinical correlation, repeat film, lateral view or CT if warranted).\n"
-                "• Do not include numbers, probabilities, model names, or any mention of AI. "
-                "Do not reproduce the headings or raw JSON; synthesise into fluent clinical language.\n"
-                "• If some sections are missing, proceed with what is available."
+                "You are a consultant radiologist. Produce one polished report in British English with "
+                "the exact section headers:\n"
+                "Impression\nFindings\nTechnique\nRecommendations\n\n"
+                "INPUTS AND RELIABILITY HIERARCHY (highest → lowest):\n"
+                "1) MAJORITY VOTING: definitive ground truth for pneumonia status (the 'summary' value). "
+                "Do not contradict this under any circumstances.\n"
+                "2) CHEXPERT: trained medical multi-label classifier. Use as primary evidence for non-pneumonia "
+                "thoracic labels (e.g., effusion, pneumothorax, cardiomegaly). If CheXpert conflicts with the "
+                "descriptive models, prefer CheXpert.\n"
+                "3) DESCRIPTIVE WITH NO DIAGNOSTIC and DESCRIPTIVE WITH DIAGNOSTIC: general vision descriptions, not "
+                "medical models. Use them to refine localisation (side/zone, perihilar, costophrenic angles), "
+                "projection/positioning, exposure, devices/artefacts, and wording. Do not introduce any diagnosis "
+                "that is unsupported by Majority/CheXpert. If they 'diagnose', treat that as tentative context only.\n\n"
+                "AUTHORING RULES:\n"
+                "• Start 'Impression' with a statement consistent with the majority pneumonia status "
+                "(pneumonia / no evidence / equivocal). If equivocal, say so plainly and outline next steps.\n"
+                "• In 'Findings', integrate salient features and precise locations; paraphrase any JSON into clinical prose.\n"
+                "• 'Technique': projection/positioning and exposure; if uncertain, use cautious phrasing (e.g., "
+                "'Erect chest radiograph; projection appears PA/AP').\n"
+                "• 'Recommendations': clinical correlation and imaging follow-up only (e.g., lateral view, repeat film, or CT if warranted). "
+                "No therapy/medication advice.\n"
+                "• Do not include numbers, probabilities, model names, or any mention of AI. Do not reproduce the input headings or raw JSON. "
+                "Write ~130–210 words. If sections are missing, proceed with what is available."
             ),
         },
         {
             "role": "user",
             "content": (
-                "### Majority decision (definitive)\n"
+                "### Majority decision summary (one of: pneumonia | no_evidence | unsure)\n"
                 "```text\n"
-                f"{summary_text or 'None provided'}\n"
+                f"{summary_text or 'unsure'}\n"
                 "```\n\n"
-                "### Evidence sections\n"
+                "### Evidence (four sections; headings may be UPPERCASE or Title Case)\n"
                 "```text\n"
                 f"{evidence_text or 'None provided'}\n"
                 "```"
@@ -444,11 +450,13 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     report = call_groq(
         messages,
         model="openai/gpt-oss-120b",
-        temperature=0.6,   # slightly tighter prose
-        top_p=1,
-        reasoning_effort="medium",
+        temperature=float(os.getenv("GROQ_TEMP", "0.35")),
+        top_p=float(os.getenv("GROQ_TOP_P", "1")),
+        reasoning_effort=os.getenv("GROQ_REASONING", "high"),
+        max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "900")),
     )
     return JSONResponse({"report": report})
+
 
 
 # ---------- /analyse (Maverick, descriptive only, no diagnosis) --------------

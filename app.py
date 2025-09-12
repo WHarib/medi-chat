@@ -83,7 +83,7 @@ DEVICE: str = (
 )
 
 GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-70b-versatile")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 MAX_COMPLETION_TOKENS: int = int(os.getenv("GROQ_MAX_COMPLETION_TOKENS", "8192"))
 

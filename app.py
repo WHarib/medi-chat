@@ -173,30 +173,80 @@ def call_groq(
     *,
     model: str = GROQ_MODEL,
     max_completion_tokens: Optional[int] = None,
+    stream: Optional[bool] = None,
     **kwargs: Any,
 ) -> str:
-    """Universal wrapper round Groq chat-completion with robust errors."""
+    """
+    Universal wrapper round Groq chat-completion with:
+      - streaming support (needed for openai/gpt-oss-120b which often streams),
+      - empty-content retry,
+      - decommissioned-model fallback.
+    """
     if not GROQ_API_KEY:
         raise HTTPException(400, "GROQ_API_KEY is not configured on the server.")
 
     if isinstance(messages, str):
         messages = [{"role": "user", "content": messages}]
 
+    client = Groq(api_key=GROQ_API_KEY)
+
+    # Default to streaming for gpt-oss-120b; otherwise non-streaming
+    use_stream = stream if stream is not None else ("gpt-oss-120b" in model)
+
+    def _once(selected_model: str, *, streamed: bool) -> str:
+        if streamed:
+            chunks: List[str] = []
+            completion = client.chat.completions.create(
+                model=selected_model,
+                messages=list(messages),
+                max_completion_tokens=max_completion_tokens or MAX_COMPLETION_TOKENS,
+                stream=True,
+                **kwargs,
+            )
+            for chunk in completion:
+                try:
+                    delta = chunk.choices[0].delta
+                    if delta and getattr(delta, "content", None):
+                        chunks.append(delta.content)
+                except Exception:
+                    # Ignore malformed chunks
+                    pass
+            return ("".join(chunks)).strip()
+        else:
+            resp = client.chat.completions.create(
+                model=selected_model,
+                messages=list(messages),
+                max_completion_tokens=max_completion_tokens or MAX_COMPLETION_TOKENS,
+                **kwargs,
+            )
+            return (resp.choices[0].message.content or "").strip()
+
     try:
-        client = Groq(api_key=GROQ_API_KEY)
-        resp = client.chat.completions.create(
-            model=model,
-            messages=list(messages),
-            max_completion_tokens=max_completion_tokens or MAX_COMPLETION_TOKENS,
-            **kwargs,
-        )
-        content = resp.choices[0].message.content or ""
-        return content.strip()
+        content = _once(model, streamed=use_stream)
+        # If empty, retry once non-streaming, then with a stable fallback
+        if not content:
+            print(f"[call_groq] Empty content from '{model}' (stream={use_stream}). Retrying non-stream.")
+            content = _once(model, streamed=False)
+        if not content and model != "llama-3.3-70b-versatile":
+            print(f"[call_groq] Still empty; falling back to llama-3.3-70b-versatile.")
+            content = _once("llama-3.3-70b-versatile", streamed=False)
+        if not content:
+            raise HTTPException(502, f"Groq returned empty content for model '{model}'.")
+        return content
     except Exception as exc:
-        # Surface an actionable message to clients (auth, quota, bad args, etc.)
+        msg = getattr(exc, "message", str(exc))
+        if "model_decommissioned" in msg or "has been decommissioned" in msg:
+            print(f"[call_groq] Model '{model}' decommissioned. Fallback: llama-3.3-70b-versatile.")
+            try:
+                return _once("llama-3.3-70b-versatile", streamed=False)
+            except Exception as exc2:
+                status = getattr(exc2, "status_code", 502)
+                detail = getattr(exc2, "message", str(exc2))
+                raise HTTPException(status, f"Groq fallback failed: {detail}") from exc2
         status = getattr(exc, "status_code", 502)
         detail = getattr(exc, "message", str(exc))
         raise HTTPException(status, f"Groq request failed: {detail}") from exc
+
 
 # ------------------------------------------------
 # Pydantic model
@@ -359,7 +409,7 @@ async def chat_endpoint(
 async def report_endpoint(
     file: UploadFile = File(...),
     final_label: str = Form(...),
-) -> JSONResponse:
+) -> JSONResponse]:
     lbl = detect_label(final_label)
     if lbl == "":
         raise HTTPException(
@@ -459,7 +509,9 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         model=os.getenv("GROQ_TEXT_MODEL", "openai/gpt-oss-120b"),
         temperature=float(os.getenv("GROQ_TEMP", "0.35")),
         top_p=float(os.getenv("GROQ_TOP_P", "1")),
-        max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "450")),
+        max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "8192")),
+        stream=True,  # important for gpt-oss-120b
+        reasoning_effort=os.getenv("GROQ_REASONING", "medium"),
     )
     return JSONResponse({"report": report})
 

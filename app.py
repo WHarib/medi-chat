@@ -456,7 +456,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
 
     report = call_groq(
         messages,
-        model=os.getenv("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
+        model=os.getenv("GROQ_TEXT_MODEL", "openai/gpt-oss-120b"),
         temperature=float(os.getenv("GROQ_TEMP", "0.35")),
         top_p=float(os.getenv("GROQ_TOP_P", "1")),
         max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "450")),

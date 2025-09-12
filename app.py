@@ -1,3 +1,15 @@
+import os, io, json, base64
+from typing import Any, Dict, List, Optional, Sequence, Union
+
+import numpy as np
+import torch
+from torchvision import models, transforms
+from PIL import Image, UnidentifiedImageError
+
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from groq import Groq
 
 MAX_B64_BYTES = 3_600_000   # safety margin under Groq's 4 MB base64 cap
 MAX_PIXELS = 33_177_600     # 33 megapixels

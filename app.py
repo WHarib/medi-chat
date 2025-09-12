@@ -391,7 +391,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
     Build a consultant-style CXR report from:
       - summary: 'pneumonia' | 'no_evidence' | 'unsure'  (definitive pneumonia status)
-      - evidence: text block containing four sections (any case):
+      - evidence: text with four sections (any case):
           * THIS IS THE RESULT OF MAJORITY VOTING
           * THIS IS THE RESULT OF CHEXPERT
           * THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC
@@ -407,7 +407,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         {
             "role": "system",
             "content": (
-                "You are a senior consultant radiologist. Produce ONE polished report in British English using "
+                "Act as a senior consultant radiologist. Produce ONE polished report in British English using "
                 "EXACTLY these plain-text section headers and order (no markdown, no asterisks):\n"
                 "Clinical details\n"
                 "Technique\n"
@@ -415,34 +415,28 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
                 "Findings\n"
                 "Impression\n"
                 "Recommendations\n\n"
-                "INPUT RELIABILITY HIERARCHY (highest → lowest):\n"
-                "1) MAJORITY VOTING (the 'summary' value): definitive ground truth for pneumonia status. Never contradict it.\n"
-                "2) CHEXPERT: trained medical multi-label classifier. Primary source for other thoracic labels "
-                "(e.g., effusion, pneumothorax, cardiomegaly). If it conflicts with the descriptive models, prefer CheXpert.\n"
-                "3) DESCRIPTIVE WITH NO DIAGNOSTIC and DESCRIPTIVE WITH DIAGNOSTIC: general vision descriptions (not medical models). "
-                "Use them to refine localisation (side/zone, perihilar regions, costophrenic angles), projection/positioning, exposure, "
-                "and presence/absence of devices/lines; also for wording. Do NOT introduce diagnoses unsupported by Majority/CheXpert.\n\n"
-                "AUTHORING & STYLE RULES:\n"
-                "• The 'summary' will be exactly one of: pneumonia | no_evidence | unsure. Align the 'Impression' with this: "
-                "  - pneumonia → appearances in keeping with infective/inflammatory process consistent with pneumonia (avoid 'community-acquired').\n"
-                "  - no_evidence → no radiographic evidence of pneumonia; emphasise normal features where appropriate.\n"
-                "  - unsure → appearances equivocal for pneumonia; state uncertainty plainly and prioritise next steps.\n"
-                "• In 'Findings', integrate salient thoracic features with precise locations (e.g., perihilar, lower zones). "
-                "Prefer concrete terms such as 'perihilar/peribronchial thickening' or 'patchy interstitial/air-space opacification' "
-                "over vague phrases like 'loss of lung-mark clarity'.\n"
-                "• Cardiomediastinal: use cautious phrasing on single AP films (e.g., 'cardiomediastinal contours within normal limits for age/AP projection'). "
-                "Do not over-call cardiomegaly on a single AP unless compelling.\n"
-                "• Paediatric cues (e.g., thymic shadow): describe as 'prominent thymic shadow' to avoid confusion with focal disease; "
-                "use age-appropriate phrasing only if indicated by the evidence; do not invent age.\n"
-                "• Negatives with limitations: it is acceptable to write 'No pleural effusion or pneumothorax detected' and note that small effusions "
-                "may be missed on a single AP radiograph.\n"
-                "• Devices/lines: mention specifically if present; otherwise 'No lines/tubes' is acceptable. Include 'No acute osseous abnormality' if appropriate.\n"
-                "• 'Technique' should state projection/positioning and exposure; if uncertain, use cautious phrasing (e.g., 'Erect chest radiograph; projection appears PA/AP').\n"
-                "• 'Comparison': if no prior studies are supplied, write 'No prior study available for comparison.'\n"
-                "• 'Recommendations': clinical correlation and imaging follow-up only. No therapy/medication advice. "
-                "For paediatric cases, prefer ultrasound if an effusion is suspected; CT only if clinically warranted.\n"
-                "• Do NOT include numbers, probabilities, model names, or any mention of AI. Do NOT reproduce the input headings or raw JSON. "
-                "Write ~130–210 words. If some inputs are missing, proceed with what is available."
+                "RELIABILITY HIERARCHY (highest → lowest):\n"
+                "1) Pneumonia status in 'summary' (pneumonia | no_evidence | unsure) is definitive. Never contradict it.\n"
+                "2) CheXpert (trained medical classifier) is the primary source for other thoracic labels "
+                "(effusion, pneumothorax, cardiomegaly, consolidation, etc.). If it conflicts with descriptive content, prefer CheXpert.\n"
+                "3) The two Descriptive sections are general vision descriptions (not medical models). Use them only to refine localisation "
+                "(side/zone, perihilar regions, costophrenic angles), projection/positioning, exposure, devices/lines, and clinical wording—"
+                "not to introduce diagnoses that contradict 1) or 2).\n\n"
+                "STYLE & CONTENT RULES:\n"
+                "• Do NOT mention majority voting, models, or AI anywhere.\n"
+                "• Clinical details: if none are provided, write a neutral clinical question such as 'Assessment for pneumonia'.\n"
+                "• Technique: infer projection/positioning and exposure. If uncertain, use cautious phrasing (e.g., 'Erect chest radiograph; projection appears PA/AP'). "
+                "Acknowledge single AP limitations when relevant.\n"
+                "• Findings: prefer precise terms (perihilar/peribronchial thickening; interstitial or air-space opacification). "
+                "Only use 'consolidation' if CheXpert supports Consolidation or if the descriptive evidence indicates focal dense lobar air-space opacity; "
+                "otherwise keep to opacification language. Avoid vague 'loss of lung-mark clarity'.\n"
+                "• Cardiomediastinal: on a single AP film, avoid over-calling heart size; use phrasing such as 'cardiomediastinal contours within normal limits for age/AP projection' "
+                "unless CheXpert supports cardiomegaly.\n"
+                "• Paediatrics: if evidence suggests a child (e.g., thymic shadow), name a 'prominent thymic shadow' and avoid mislabelling it as focal disease.\n"
+                "• Negatives with limits: you may write 'No pleural effusion or pneumothorax detected', adding that a small effusion can be occult on a single AP view.\n"
+                "• Recommendations: clinical correlation and imaging follow-up only. No therapy/medication advice. For paediatrics, ultrasound if effusion suspected; "
+                "repeat radiograph if non-improving/deteriorating; CT only if clinically warranted.\n"
+                "• Do NOT include numbers, probabilities, model names, or raw JSON. Write ~130–210 words. If inputs are incomplete, proceed with what is available."
             ),
         },
         {
@@ -465,12 +459,9 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         model=os.getenv("GROQ_TEXT_MODEL", "llama-3.3-70b-versatile"),
         temperature=float(os.getenv("GROQ_TEMP", "0.35")),
         top_p=float(os.getenv("GROQ_TOP_P", "1")),
-        # keep output tight and predictable
         max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "450")),
     )
     return JSONResponse({"report": report})
-
-
 
 # ---------- /analyse (Maverick, descriptive only, no diagnosis) --------------
 @app.post("/analyse")

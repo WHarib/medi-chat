@@ -389,14 +389,8 @@ async def report_endpoint(
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
-    Turn a majority-anchored summary plus a four-section evidence block into a
-    concise British-English narrative report.
-
-    Evidence sections are expected (but not required) to contain these exact headings:
-      - THIS IS THE RESULT OF MAJORITY VOTING          (authoritative pneumonia status)
-      - THIS IS THE RESULT OF CHEXPERT                 (multi-label findings)
-      - THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC
-      - THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC
+    Convert a majority-anchored summary + four-section evidence block into
+    a concise, consultant-style radiology report (British English).
     """
     evidence_text = (payload.evidence or "").strip()
     summary_text  = (payload.summary  or "").strip()
@@ -410,25 +404,26 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         {
             "role": "system",
             "content": (
-                "You are a senior consultant radiologist. You will receive:\n"
-                "1) A one-sentence MAJORITY DECISION summary (this is the definitive pneumonia status), and\n"
-                "2) An evidence block containing four sections with headings:\n"
-                "   - THIS IS THE RESULT OF MAJORITY VOTING\n"
-                "   - THIS IS THE RESULT OF CHEXPERT\n"
-                "   - THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC\n"
-                "   - THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC\n\n"
+                "You are a consultant radiologist. Produce a single, polished report in British English "
+                "(≈140–220 words) with the following sections, in order:\n"
+                "Impression, Findings, Technique, Recommendations.\n\n"
+                "Inputs you receive:\n"
+                "• A one-sentence MAJORITY DECISION summary — this is the definitive pneumonia status and must not be contradicted.\n"
+                "• An evidence block with four headings:\n"
+                "  - THIS IS THE RESULT OF MAJORITY VOTING (ground truth)\n"
+                "  - THIS IS THE RESULT OF CHEXPERT\n"
+                "  - THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC\n"
+                "  - THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC\n\n"
                 "Authoring rules:\n"
-                "• Treat the MAJORITY VOTING decision as ground truth. Do not contradict it.\n"
-                "• Use the other sections only to elaborate locations, ancillary thoracic findings, "
-                "view/positioning, exposure and devices/artefacts.\n"
-                "• Write a single concise narrative report in British English (≈150–250 words): "
-                "open with the diagnosis consistent with the majority decision; then a compact imaging description "
-                "with anatomical locations; include clinically relevant additional findings; finish with sensible "
-                "recommendations.\n"
+                "• Start 'Impression' with a clear diagnostic statement aligned with the majority decision. "
+                "If equivocal, state the uncertainty plainly and prioritise next steps.\n"
+                "• 'Findings' should integrate salient thoracic features (locations, side/zone, devices/artefacts) from the evidence; "
+                "paraphrase JSON content into clinical prose.\n"
+                "• 'Technique' should briefly state projection/positioning and exposure if available.\n"
+                "• 'Recommendations' should be proportionate and pragmatic (e.g., clinical correlation, repeat film, lateral view or CT if warranted).\n"
                 "• Do not include numbers, probabilities, model names, or any mention of AI. "
-                "Do not reproduce the headings or raw JSON; synthesise into fluent prose.\n"
-                "• If the majority decision is equivocal, clearly state uncertainty and give appropriate next steps.\n"
-                "• If sections are missing or malformed, proceed with what is available."
+                "Do not reproduce the headings or raw JSON; synthesise into fluent clinical language.\n"
+                "• If some sections are missing, proceed with what is available."
             ),
         },
         {
@@ -449,7 +444,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     report = call_groq(
         messages,
         model="openai/gpt-oss-120b",
-        temperature=0.7,
+        temperature=0.6,   # slightly tighter prose
         top_p=1,
         reasoning_effort="medium",
     )

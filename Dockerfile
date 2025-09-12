@@ -19,5 +19,7 @@ RUN pip install -r requirements.txt
 COPY app.py .
 COPY densenet121_finetuned.pth thresholds.json .
 
+ENV PORT=7860
 EXPOSE 7860
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
+CMD ["sh", "-lc", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
+

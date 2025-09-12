@@ -213,7 +213,7 @@ class LLMReportIn(BaseModel):
 def root() -> Dict[str, Any]:
     return {
         "ok": True,
-        "message": "Use /predict_chexpert, /chat, /report, /llmreport, /vision_report, or /analyse.",
+        "message": "Use /predict_chexpert, /chat, /report, /llmreport, /analyse, or /diagnose.",
     }
 
 
@@ -512,5 +512,116 @@ Return a strict JSON object with exactly these keys:
             "analysis": parsed,
             "raw": None if parsed is not None else raw,
             "note": "Descriptive only. No diagnostic interpretation provided.",
+        }
+    )
+    
+# ---------- /diagnose (descriptive + diagnostic) -----------------------------
+@app.post("/diagnose")
+async def diagnose(
+    file: UploadFile = File(...),
+    extra_instructions: str = Form(
+        "",
+        description="Optional extra guidance (diagnostic allowed).",
+    ),
+) -> JSONResponse:
+    """
+    Diagnostic analysis of a chest X-ray using Groq Maverick.
+    Returns structured JSON with descriptive fields AND per-label diagnostic calls.
+    This endpoint is for research/informational purposes and not for clinical use.
+    """
+    try:
+        img_bytes: bytes = await file.read()
+        pil = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except UnidentifiedImageError as exc:
+        raise HTTPException(400, f"Bad image: {exc}") from exc
+    except Exception as exc:
+        raise HTTPException(400, f"Unable to read image: {exc!r}") from exc
+
+    # Create compact data URL for the vision model
+    data_url = make_data_url_under_limit(img_bytes, file.filename or "upload.png")
+
+    # Optional: include CNN evidence as structured context (model never sees the raw image pixels here)
+    try:
+        cnn = classify_image(pil)
+    except Exception:
+        cnn = {"note": "CNN evidence unavailable for this image."}
+
+    # Build the diagnostic JSON instruction
+    # NB: Ask for explicit status + confidence per label and short evidence with location terms.
+    label_list_json = json.dumps(LABELS, ensure_ascii=False)
+    json_request_instructions = f"""
+You are a senior consultant radiologist. Describe and DIAGNOSE the chest X-ray in British English.
+Use precise anatomical terms (e.g., right upper zone, left lower zone, perihilar, costophrenic angle).
+Consider the image FIRST; you may use the supporting CNN evidence as secondary context.
+
+Return a strict JSON object with exactly these keys and shapes:
+{{
+  "image_orientation_marker": "One of: 'R', 'L', 'Both', 'None visible', or 'Unclear'.",
+  "view_and_positioning": "PA/AP/Supine/Erect if inferable; otherwise 'Unclear'.",
+  "exposure_contrast": "Short text on exposure/contrast adequacy.",
+  "anatomical_description": "Short paragraph describing visible anatomy and lung fields.",
+  "devices_and_artefacts": ["List devices/artefacts/implants/foreign bodies if seen; otherwise empty array."],
+  "findings": {{
+    "labels": {label_list_json},
+    "per_label": {{
+      "<label>": {{
+        "status": "present" | "absent" | "uncertain",
+        "confidence": 0.00-1.00,
+        "location": "Anatomical location(s) or 'None'",
+        "evidence": "One or two sentences citing visible signs (e.g., focal opacity at LLL, blunted R CPA).",
+        "severity": "If applicable: mild | moderate | severe | 'N/A'"
+      }}
+      // Include an entry for EVERY label in 'labels' above.
+    }}
+  }},
+  "overall_impression": "≤ 5 sentences summarising the key diagnoses and their clinical significance.",
+  "recommendations": ["0–3 concise next steps if relevant; otherwise empty array."],
+  "disclaimer": "For research/informational use only; not a clinical decision tool."
+}}
+Special handling for 'No Finding': set status 'present' ONLY when all other labels are 'absent' and exposure/positioning are adequate; otherwise set 'absent'.
+{extra_instructions.strip()}
+""".strip()
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        json_request_instructions
+                        + "\n\n### Supporting CNN evidence (optional)\n```json\n"
+                        + json.dumps(cnn, indent=2)
+                        + "\n```"
+                    ),
+                },
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ],
+        }
+    ]
+
+    raw = call_groq(
+        messages,
+        model=GROQ_VISION_MODEL_MAVERICK,
+        temperature=0.2,
+        top_p=1,
+        response_format={"type": "json_object"},
+        max_completion_tokens=1536,
+    )
+
+    parsed: Optional[Dict[str, Any]] = None
+    try:
+        maybe = json.loads(raw)
+        if isinstance(maybe, dict):
+            parsed = maybe
+    except Exception:
+        parsed = None
+
+    return JSONResponse(
+        {
+            "model": GROQ_VISION_MODEL_MAVERICK,
+            "diagnosis": parsed,
+            "raw": None if parsed is not None else raw,
+            "note": "Diagnostic output for research/informational use only.",
         }
     )

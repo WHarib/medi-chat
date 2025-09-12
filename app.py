@@ -452,8 +452,8 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         model="openai/gpt-oss-120b",
         temperature=float(os.getenv("GROQ_TEMP", "0.35")),
         top_p=float(os.getenv("GROQ_TOP_P", "1")),
-        reasoning_effort=os.getenv("GROQ_REASONING", "high"),
-        max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "900")),
+        reasoning_effort=os.getenv("GROQ_REASONING", "low"),
+        max_completion_tokens=int(os.getenv("GROQ_MAX_REPORT_TOKENS", "450")),
     )
     return JSONResponse({"report": report})
 

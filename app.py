@@ -385,10 +385,19 @@ async def report_endpoint(
     report = call_groq(prompt)
     return JSONResponse({"report": report, "final_label": lbl})
 
-
 # ---------- /llmreport -------------------------------------------------------
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
+    """
+    Turn a majority-anchored summary plus a four-section evidence block into a
+    concise British-English narrative report.
+
+    Evidence sections are expected (but not required) to contain these exact headings:
+      - THIS IS THE RESULT OF MAJORITY VOTING          (authoritative pneumonia status)
+      - THIS IS THE RESULT OF CHEXPERT                 (multi-label findings)
+      - THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC
+      - THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC
+    """
     evidence_text = (payload.evidence or "").strip()
     summary_text  = (payload.summary  or "").strip()
 
@@ -401,22 +410,35 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         {
             "role": "system",
             "content": (
-                "You are a senior consultant radiologist. The caller provides a "
-                "summary (definitive for pneumonia status) and an evidence block. "
-                "Write a concise narrative report in British English (≈150–250 words) "
-                "with: opening diagnosis (as per summary), imaging description, "
-                "clinical significance, and recommendations. Do not include numbers, "
-                "probabilities, or mention AI."
+                "You are a senior consultant radiologist. You will receive:\n"
+                "1) A one-sentence MAJORITY DECISION summary (this is the definitive pneumonia status), and\n"
+                "2) An evidence block containing four sections with headings:\n"
+                "   - THIS IS THE RESULT OF MAJORITY VOTING\n"
+                "   - THIS IS THE RESULT OF CHEXPERT\n"
+                "   - THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC\n"
+                "   - THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC\n\n"
+                "Authoring rules:\n"
+                "• Treat the MAJORITY VOTING decision as ground truth. Do not contradict it.\n"
+                "• Use the other sections only to elaborate locations, ancillary thoracic findings, "
+                "view/positioning, exposure and devices/artefacts.\n"
+                "• Write a single concise narrative report in British English (≈150–250 words): "
+                "open with the diagnosis consistent with the majority decision; then a compact imaging description "
+                "with anatomical locations; include clinically relevant additional findings; finish with sensible "
+                "recommendations.\n"
+                "• Do not include numbers, probabilities, model names, or any mention of AI. "
+                "Do not reproduce the headings or raw JSON; synthesise into fluent prose.\n"
+                "• If the majority decision is equivocal, clearly state uncertainty and give appropriate next steps.\n"
+                "• If sections are missing or malformed, proceed with what is available."
             ),
         },
         {
             "role": "user",
             "content": (
-                "### Confirmed summary\n"
+                "### Majority decision (definitive)\n"
                 "```text\n"
                 f"{summary_text or 'None provided'}\n"
                 "```\n\n"
-                "### Supporting evidence\n"
+                "### Evidence sections\n"
                 "```text\n"
                 f"{evidence_text or 'None provided'}\n"
                 "```"

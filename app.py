@@ -409,7 +409,7 @@ async def chat_endpoint(
 async def report_endpoint(
     file: UploadFile = File(...),
     final_label: str = Form(...),
-) -> JSONResponse]:
+) -> JSONResponse:
     lbl = detect_label(final_label)
     if lbl == "":
         raise HTTPException(

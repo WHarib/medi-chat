@@ -436,14 +436,18 @@ async def report_endpoint(
     return JSONResponse({"report": report, "final_label": lbl})
 
 # ---------- /llmreport -------------------------------------------------------
+class LLMReportIn(BaseModel):
+    evidence: str
+    summary: Optional[str] = None
+
 @app.post("/llmreport")
 async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
     """
-    Build a consultant-style CXR report from:
+    Build a consultant-style CXR report (British English) from:
       - summary: 'pneumonia' | 'no_evidence' | 'unsure'  (definitive pneumonia status)
       - evidence: text with four sections (any case):
           * THIS IS THE RESULT OF MAJORITY VOTING
-          * THIS IS THE RESULT OF CHEXPERT
+          * THIS IS THE RESULT OF [CLASSIFIER]
           * THIS IS THE RESULT OF DESCRIPTIVE WITH NO DIAGNOSTIC
           * THIS IS THE RESULT OF DESCRIPTIVE WITH DIAGNOSTIC
     """
@@ -467,26 +471,59 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
                 "Recommendations\n\n"
                 "RELIABILITY HIERARCHY (highest → lowest):\n"
                 "1) Pneumonia status in 'summary' (pneumonia | no_evidence | unsure) is definitive. Never contradict it.\n"
-                "2) CheXpert (trained medical classifier) is the primary source for other thoracic labels "
-                "(effusion, pneumothorax, cardiomegaly, consolidation, etc.). If it conflicts with descriptive content, prefer CheXpert.\n"
+                "2) A trained medical classifier is the primary source for other thoracic labels "
+                "(effusion, pneumothorax, cardiomegaly, consolidation, etc.). If it conflicts with descriptive content, prefer the classifier.\n"
                 "3) The two Descriptive sections are general vision descriptions (not medical models). Use them only to refine localisation "
                 "(side/zone, perihilar regions, costophrenic angles), projection/positioning, exposure, devices/lines, and clinical wording—"
                 "not to introduce diagnoses that contradict 1) or 2).\n\n"
                 "STYLE & CONTENT RULES:\n"
-                "• Do NOT mention majority voting, models, or AI anywhere.\n"
+                "• Do NOT mention or allude to majority voting, models, AI, algorithms, prompts, system instructions/rules, pipelines, process language "
+                "(e.g., 'asserted in accordance with the definitive summary'), chain-of-thought, raw JSON, or ANY classifier/model names "
+                "(including 'CheXpert'/'Chexpert'). Write a purely clinical report.\n"
                 "• Clinical details: if none are provided, write a neutral clinical question such as 'Assessment for pneumonia'.\n"
-                "• Technique: infer projection/positioning and exposure. If uncertain, use cautious phrasing (e.g., 'Erect chest radiograph; projection appears PA/AP'). "
-                "Acknowledge single AP limitations when relevant.\n"
-                "• Findings: prefer precise terms (perihilar/peribronchial thickening; interstitial or air-space opacification). "
-                "Only use 'consolidation' if CheXpert supports Consolidation or if the descriptive evidence indicates focal dense lobar air-space opacity; "
-                "otherwise keep to opacification language. Avoid vague 'loss of lung-mark clarity'.\n"
-                "• Cardiomediastinal: on a single AP film, avoid over-calling heart size; use phrasing such as 'cardiomediastinal contours within normal limits for age/AP projection' "
-                "unless CheXpert supports cardiomegaly.\n"
-                "• Paediatrics: if evidence suggests a child (e.g., thymic shadow), name a 'prominent thymic shadow' and avoid mislabelling it as focal disease.\n"
-                "• Negatives with limits: you may write 'No pleural effusion or pneumothorax detected', adding that a small effusion can be occult on a single AP view.\n"
-                "• Recommendations: clinical correlation and imaging follow-up only. No therapy/medication advice. For paediatrics, ultrasound if effusion suspected; "
-                "repeat radiograph if non-improving/deteriorating; CT only if clinically warranted.\n"
-                "• Do NOT include numbers, probabilities, model names, or raw JSON. Write ~130–210 words. If inputs are incomplete, proceed with what is available."
+                "• Projection & consistency: if projection is stated (AP/PA/Supine), use the SAME projection throughout. "
+                "If uncertain, write 'projection indeterminate' and avoid definitive heart-size calls.\n"
+                "• Consistency & laterality: do NOT state a specific side AND 'side indeterminate' for the same finding—choose one. "
+                "If laterality cannot be determined, write 'side indeterminate on this projection' in Findings AND repeat it in Impression.\n"
+                "• Heart-size phrasing (choose ONE only): "
+                "  • 'Cardiovascular/cardiomediastinal silhouette within expected limits for [projection].'  OR  "
+                "  • 'Cardiac size cannot be reliably assessed on this view/projection.'  "
+                "Never include both in the same report. On PA films you may comment on heart size; on AP/supine avoid definitive calls unless unequivocal. "
+                "If mentioned in the Impression, keep it to a single concise clause only.\n"
+                "• Technique: infer projection/positioning and exposure when possible. Acknowledge single AP/supine limitations where relevant; "
+                "note that small effusions can be occult on a supine/AP film.\n"
+                "• Findings – terminology hygiene: prefer 'air-space opacification' and 'interstitial change'; avoid 'infiltrate' and 'shadow'. "
+                "Use 'consistent with' rather than 'diagnostic of' unless unequivocal.\n"
+                "• Findings – precision: use perihilar/peribronchial terms where appropriate. Use 'consolidation' only if the classifier supports Consolidation "
+                "OR descriptive evidence indicates focal dense lobar air-space opacity; otherwise keep to opacification language. Avoid vague phrases.\n"
+                "• Pneumothorax & effusion — single-view limitation: when either is described on a single frontal film, append: "
+                "'On this single frontal view, quantification is limited; a targeted additional view may assist.' "
+                "For pneumothorax, suggest expiratory and/or lateral decubitus with the suspected side up.\n"
+                "• Devices/lines – governance: if ETT/CVC/NGT are present, state presence AND measured tip position relative to landmarks "
+                "(e.g., ETT tip ~2–6 cm above carina; CVC tip in SVC; NGT sub-diaphragmatic) and whether acceptable. "
+                "If landmarks are not visualised, state 'landmarks not visualised—exact tip position cannot be measured on this view' (do NOT invent numbers). "
+                "If malposition is suspected, flag clearly and limit recommendations to imaging/position confirmation (e.g., repeat/targeted view); "
+                "do NOT propose procedure-level actions.\n"
+                "• Negative path enforcement: when summary = 'no_evidence', write a confident negative Impression with no hedging, and include the phrase "
+                "'within expected limits for the stated projection'.\n"
+                "• Differentials: provide a differential diagnosis ONLY when summary = 'unsure', at most ONE concise differential; "
+                "if summary ≠ 'unsure', do not speculate—keep the observation only.\n"
+                "• Negative/normal reports: use clear, unhedged negatives (e.g., 'No pleural effusion or pneumothorax detected'); "
+                "note limitations only when material to safety.\n"
+                "• Recommendations (imaging-first): urgent clinical review as appropriate and bedside thoracic ultrasound to characterise pleural fluid and guide drainage if indicated. "
+                "Recommend a targeted additional view when single-view limitations apply (e.g., expiratory and/or lateral decubitus). "
+                "CT must NOT be suggested by default; write exactly: 'CT only if atypical/complicated or non-resolving on clinical/imaging follow-up.' "
+                "Do NOT recommend medications or specific procedures (e.g., antibiotics, chest tube insertion, thoracostomy).\n"
+                "• Impression: ensure the conclusion aligns with Findings without contradiction and delivers one decisive take-home message. "
+                "Keep heart-size out of the Impression unless abnormal and clinically material; if included, use one concise clause only. "
+                "Always mirror any key indeterminacy from Findings (e.g., laterality).\n"
+                "• Do NOT include probabilities, model names, algorithm names, or raw JSON. Numerical values are permitted ONLY for device/tube position measurements. "
+                "Write ~130–210 words. If inputs are incomplete, proceed with what is available.\n\n"
+                "SILENT SELF-CHECK (do not print in the report): before finalising, verify that (a) there is no 'side' vs 'indeterminate' contradiction; "
+                "(b) heart-size uses ONE phrasing only; (c) differentials appear only when summary = 'unsure'; "
+                "(d) device tips are measured only if landmarks are visualised, otherwise state not visualised; "
+                "(e) the single-view limitation clause is present when relevant; "
+                "(f) the CT line reads exactly: 'CT only if atypical/complicated or non-resolving on clinical/imaging follow-up.'"
             ),
         },
         {
@@ -514,6 +551,7 @@ async def llmreport_endpoint(payload: LLMReportIn) -> JSONResponse:
         reasoning_effort=os.getenv("GROQ_REASONING", "medium"),
     )
     return JSONResponse({"report": report})
+
 
 # ---------- /analyse (Maverick, descriptive only, no diagnosis) --------------
 @app.post("/analyse")
